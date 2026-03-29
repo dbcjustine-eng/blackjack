@@ -1107,6 +1107,11 @@ function RoomScreen({ user, roomId, isHost: initIsHost, onLeave, onUpdateTokens 
     if (b<1||b>user.tokens||!myRp) return;
     await supabase.from("room_players").update({bet:b,status:"ready"}).eq("id",myRp.id);
     onUpdateTokens(-b,"");
+    // Si la room est "finished", la remettre en waiting pour la nouvelle manche
+    const { data: roomNow } = await supabase.from("rooms").select("status").eq("id",roomId).single();
+    if (roomNow?.status==="finished") {
+      await supabase.from("rooms").update({status:"waiting",dealer_cards:[],deck:freshDeck(),action_seat:0}).eq("id",roomId);
+    }
     // Vérifier si tout le monde a misé → lancer auto
     const { data: allRp } = await supabase.from("room_players").select("status").eq("room_id",roomId);
     const allReady = allRp && allRp.length >= 2 && allRp.every(p=>p.status==="ready");
@@ -1121,7 +1126,7 @@ function RoomScreen({ user, roomId, isHost: initIsHost, onLeave, onUpdateTokens 
       .select("*, players(username,tokens)").eq("room_id",roomId).order("seat");
     // Vérifier statut room (pas déjà lancée)
     const { data: roomCheck } = await supabase.from("rooms").select("status").eq("id",roomId).single();
-    if (roomCheck?.status !== "waiting") { busy.current=false; return; }
+    if (roomCheck?.status !== "waiting" && roomCheck?.status !== "finished") { busy.current=false; return; }
     const active = (freshPlayers||[]).filter(p=>p.status==="ready");
     if (active.length===0) { busy.current=false; return; }
 
