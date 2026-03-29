@@ -1,8 +1,9 @@
 import { useState, useRef, useEffect } from "react";
 import { supabase } from "./supabase.js";
+import { PokerLobby, PokerRoom } from "./Poker.jsx";
 
 // ── TRANSACTION LOGGER ────────────────────────────────────────────────────────
-async function logTransaction(playerId, type, amount, description, balanceAfter) {
+export async function logTransaction(playerId, type, amount, description, balanceAfter) {
   await supabase.from("transactions").insert({
     player_id: playerId,
     type,
@@ -17,7 +18,7 @@ const SUITS = ["♠","♥","♦","♣"];
 const RANKS = ["A","2","3","4","5","6","7","8","9","10","J","Q","K"];
 const RED   = new Set(["♥","♦"]);
 
-function freshDeck() {
+export function freshDeck() {
   const d = [];
   for (const s of SUITS) for (const r of RANKS) d.push({ suit:s, rank:r });
   for (let i = d.length-1; i > 0; i--) {
@@ -927,7 +928,7 @@ function HistoryScreen({ playerId, playerName, onBack, isAdmin }) {
 
 
 // ── LOBBY SCREEN ─────────────────────────────────────────────────────────────
-function LobbyScreen({ user, onEnterRoom, onSolo, onLogout }) {
+function LobbyScreen({ user, onEnterRoom, onSolo, onPoker, onLogout }) {
   const [roomCode,  setRoomCode]  = useState("");
   const [creating,  setCreating]  = useState(false);
   const [joining,   setJoining]   = useState(false);
@@ -993,16 +994,24 @@ function LobbyScreen({ user, onEnterRoom, onSolo, onLogout }) {
 
       {/* Solo */}
       <button onClick={onSolo} style={{
-        width:"100%", padding:16, marginBottom:12,
+        width:"100%", padding:16, marginBottom:10,
         background:"linear-gradient(135deg,#ffd700,#ffaa00)",
         border:"none", borderRadius:14, fontSize:16, fontWeight:900,
         color:"#111", cursor:"pointer", letterSpacing:1,
         boxShadow:"0 5px 24px rgba(255,185,0,.4)",
-      }}>🃏 Jouer en solo</button>
+      }}>🃏 Blackjack solo</button>
 
-      <div style={{display:"flex",alignItems:"center",gap:10,margin:"8px 0 16px"}}>
+      <button onClick={onPoker} style={{
+        width:"100%", padding:16, marginBottom:12,
+        background:"linear-gradient(135deg,#e74c3c,#c0392b)",
+        border:"none", borderRadius:14, fontSize:16, fontWeight:900,
+        color:"#fff", cursor:"pointer", letterSpacing:1,
+        boxShadow:"0 5px 24px rgba(231,76,60,.35)",
+      }}>♠ Poker Texas Hold'em</button>
+
+      <div style={{display:"flex",alignItems:"center",gap:10,margin:"4px 0 14px"}}>
         <div style={{flex:1,height:1,background:"#1a1a2e"}}/>
-        <div style={{color:"#333",fontSize:12}}>ou multijoueur</div>
+        <div style={{color:"#333",fontSize:12}}>blackjack multijoueur</div>
         <div style={{flex:1,height:1,background:"#1a1a2e"}}/>
       </div>
 
@@ -1012,7 +1021,7 @@ function LobbyScreen({ user, onEnterRoom, onSolo, onLogout }) {
         background:creating?"#1a1a2e":"#0d2b1a",
         border:"1.5px solid #1a5c2a", borderRadius:14, fontSize:15, fontWeight:800,
         color:creating?"#444":"#4caf50", cursor:creating?"default":"pointer",
-      }}>{creating ? "Création…" : "➕ Créer une table"}</button>
+      }}>{creating ? "Création…" : "➕ Créer une table blackjack"}</button>
 
       {/* Rejoindre */}
       <div style={{display:"flex",gap:8}}>
@@ -1513,8 +1522,9 @@ function LoginScreen({ onLogin }) {
 // ── APP ───────────────────────────────────────────────────────────────────────
 export default function App() {
   const [currentUser, setCurrentUser] = useState(null);
-  const [screen,      setScreen]      = useState("lobby"); // lobby | solo | room
+  const [screen,      setScreen]      = useState("lobby"); // lobby | solo | room | poker-lobby | poker-room
   const [roomId,      setRoomId]      = useState(null);
+  const [pokerRoomId, setPokerRoomId] = useState(null);
   const [isHost,      setIsHost]      = useState(false);
 
   async function updateTokens(delta, description = "") {
@@ -1549,13 +1559,19 @@ export default function App() {
         {!currentUser && <LoginScreen onLogin={setCurrentUser}/>}
         {currentUser && currentUser.is_admin && <AdminPanel currentUser={currentUser} onLogout={handleLogout}/>}
         {currentUser && !currentUser.is_admin && screen==="lobby" && (
-          <LobbyScreen user={currentUser} onSolo={()=>setScreen("solo")} onEnterRoom={handleEnterRoom} onLogout={handleLogout}/>
+          <LobbyScreen user={currentUser} onSolo={()=>setScreen("solo")} onPoker={()=>setScreen("poker-lobby")} onEnterRoom={handleEnterRoom} onLogout={handleLogout}/>
         )}
         {currentUser && !currentUser.is_admin && screen==="solo" && (
           <GameScreen user={currentUser} onUpdateTokens={updateTokens} onLogout={()=>setScreen("lobby")}/>
         )}
         {currentUser && !currentUser.is_admin && screen==="room" && roomId && (
           <RoomScreen user={currentUser} roomId={roomId} isHost={isHost} onLeave={()=>setScreen("lobby")} onUpdateTokens={updateTokens}/>
+        )}
+        {currentUser && !currentUser.is_admin && screen==="poker-lobby" && (
+          <PokerLobby user={currentUser} onEnterRoom={id=>{setPokerRoomId(id);setScreen("poker-room");}} onBack={()=>setScreen("lobby")}/>
+        )}
+        {currentUser && !currentUser.is_admin && screen==="poker-room" && pokerRoomId && (
+          <PokerRoom user={currentUser} roomId={pokerRoomId} onLeave={()=>setScreen("poker-lobby")} onUpdateTokens={updateTokens}/>
         )}
       </div>
 
