@@ -142,7 +142,7 @@ export function PokerSoloBots({ user, botCount, onBack, onUpdateTokens }) {
     else{const b=newBots.find(x=>x.seat===sbSeat);if(b){b.betThisRound=SMALL_BLIND;b.totalBet=SMALL_BLIND;b.tokens-=SMALL_BLIND;}}
     if(bbSeat===0){playerTokens-=BIG_BLIND;pBet=BIG_BLIND;}
     else{const b=newBots.find(x=>x.seat===bbSeat);if(b){b.betThisRound=BIG_BLIND;b.totalBet=BIG_BLIND;b.tokens-=BIG_BLIND;}}
-    return {deck,community:[],pot,currentBet:BIG_BLIND,phase:"preflop",actionSeat,dealerSeat:0,sbSeat,bbSeat,playerCards,playerBet:pBet,playerTotalBet:pBet,playerStatus:"active",bots:newBots,playerTokens,msg:"",winners:[],botThinking:false};
+    return {deck,community:[],pot,currentBet:BIG_BLIND,phase:"preflop",actionSeat,dealerSeat:0,sbSeat,bbSeat,playerCards,playerBet:pBet,playerTotalBet:pBet,playerStatus:"active",bots:newBots,playerTokens,msg:"",winners:[]};
   }
 
   const [game,setGame]=useState(()=>buildGame(user.tokens));
@@ -189,7 +189,7 @@ export function PokerSoloBots({ user, botCount, onBack, onUpdateTokens }) {
 
   function act(action, raiseAmt=0) {
     setGame(prev=>{
-      let g={...prev,bots:prev.bots.map(b=>({...b})),msg:"",botThinking:false};
+      let g={...prev,bots:prev.bots.map(b=>({...b})),msg:""};
       const tc=Math.max(0,g.currentBet-(g.playerBet||0));
       if(action==="fold"){g.playerStatus="folded";}
       else if(action==="call"){const c=Math.min(tc,g.playerTokens);g.playerTokens-=c;g.playerBet=(g.playerBet||0)+c;g.playerTotalBet=(g.playerTotalBet||0)+c;g.pot+=c;}
@@ -198,30 +198,31 @@ export function PokerSoloBots({ user, botCount, onBack, onUpdateTokens }) {
     });
   }
 
-  // Bots réactifs
+  // Bots réactifs — simple et robuste
+  const botTimerRef = useRef(null);
   useEffect(()=>{
+    clearTimeout(botTimerRef.current);
     if(!["preflop","flop","turn","river"].includes(game.phase)) return;
     if(game.actionSeat===0) return;
-    if(game.botThinking) return;
-    const bot=game.bots.find(b=>b.seat===game.actionSeat);
-    if(!bot||bot.status!=="active"){setGame(prev=>advance({...prev,bots:prev.bots.map(b=>({...b}))},false));return;}
-    setGame(prev=>({...prev,botThinking:true}));
-    const timer=setTimeout(()=>{
+    const snapshot = { seat: game.actionSeat, phase: game.phase };
+    botTimerRef.current = setTimeout(()=>{
       setGame(prev=>{
-        if(prev.phase==="showdown") return prev;
-        let g={...prev,bots:prev.bots.map(b=>({...b})),botThinking:false};
+        // Vérifier que le tour n'a pas changé entre-temps
+        if(prev.actionSeat!==snapshot.seat||prev.phase!==snapshot.phase) return prev;
+        if(!["preflop","flop","turn","river"].includes(prev.phase)) return prev;
+        let g={...prev,bots:prev.bots.map(b=>({...b}))};
         const b=g.bots.find(x=>x.seat===g.actionSeat);
         if(!b||b.status!=="active") return advance(g,false);
         const decision=botAction(b,g);
         const tc=Math.max(0,g.currentBet-(b.betThisRound||0));
         if(decision==="fold"){b.status="folded";g.msg=b.icon+" "+b.name+" passe";}
         else if(decision==="call"||decision==="check"){const c=tc>0?Math.min(tc,b.tokens):0;if(c>0){b.tokens-=c;b.betThisRound=(b.betThisRound||0)+c;b.totalBet=(b.totalBet||0)+c;g.pot+=c;}g.msg=tc===0?b.icon+" "+b.name+" check":b.icon+" "+b.name+" call "+c+"🪙";}
-        else if(decision==="raise"){const extra=Math.max(BIG_BLIND,Math.floor(BIG_BLIND+Math.random()*g.pot*0.35));const tot=Math.min(tc+extra,b.tokens);b.tokens-=tot;b.betThisRound=(b.betThisRound||0)+tot;b.totalBet=(b.totalBet||0)+tot;g.pot+=tot;g.currentBet=b.betThisRound;g.msg=b.icon+" "+b.name+" relance "+tot+"🪙 💪";}
+        else{const extra=Math.max(BIG_BLIND,Math.floor(BIG_BLIND+Math.random()*g.pot*0.35));const tot=Math.min(tc+extra,b.tokens);b.tokens-=tot;b.betThisRound=(b.betThisRound||0)+tot;b.totalBet=(b.totalBet||0)+tot;g.pot+=tot;g.currentBet=b.betThisRound;g.msg=b.icon+" "+b.name+" relance "+tot+"🪙 💪";}
         return advance(g,decision==="raise");
       });
-    }, 1200+Math.random()*1000);
-    return()=>clearTimeout(timer);
-  },[game.actionSeat,game.phase,game.botThinking,advance]);
+    }, 1000+Math.random()*800);
+    return()=>clearTimeout(botTimerRef.current);
+  },[game.actionSeat,game.phase]);
 
   // Timer 20s joueur
   const isMyTurnNow = game.actionSeat===0&&game.playerStatus==="active"&&["preflop","flop","turn","river"].includes(game.phase);
@@ -297,8 +298,8 @@ export function PokerSoloBots({ user, botCount, onBack, onUpdateTokens }) {
           </div>
         )}
 
-        {g.botThinking&&g.phase!=="showdown"&&(
-          <div style={{position:"absolute",left:"50%",top:"18%",transform:"translateX(-50%)",color:"rgba(255,255,255,.25)",fontSize:10,whiteSpace:"nowrap"}}>
+        {g.actionSeat!==0&&g.phase!=="showdown"&&(
+          <div style={{position:"absolute",left:"50%",top:"18%",transform:"translateX(-50%)",color:"rgba(255,255,255,.3)",fontSize:10,whiteSpace:"nowrap"}}>
             {g.bots.find(b=>b.seat===g.actionSeat)?.icon} réfléchit…
           </div>
         )}

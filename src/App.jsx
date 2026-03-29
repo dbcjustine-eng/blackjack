@@ -1289,155 +1289,169 @@ function RoomScreen({ user, roomId, isHost: initIsHost, onLeave, onUpdateTokens 
 
   const roomStatus = room.status;
   const myResult = myRp?.result;
-  const myHands = myRp?.hands || [[]];
   const myBet = myRp?.bet || 0;
   const dealerCards = (room.dealer_cards||[]);
   const dealerScore = dealerCards.every(c=>c.faceUp!==false)
     ? handScore(dealerCards.map(c=>c.card||c))
     : dealerCards.filter(c=>c.faceUp!==false).length>0
       ? handScore(dealerCards.filter(c=>c.faceUp!==false).map(c=>c.card||c))+"+" : "?";
-
   const iAmPlaying = myRp?.status==="playing";
   const iAmDone = myRp?.status==="done"||myRp?.status==="finished";
-  const allReady = roomPlayers.length>0 && roomPlayers.every(p=>p.status==="ready"||p.status==="playing"||p.status==="done"||p.status==="finished");
+
+  // Positions en cercle autour de la table ovale
+  function bjSeatPos(idx, total) {
+    // idx 0 = joueur local (bas), idx 1..n = autres joueurs (autour)
+    const angle = (Math.PI/2) + (2*Math.PI*idx/total);
+    return { x: 50 + 42*Math.cos(angle), y: 42 + 33*Math.sin(angle) };
+  }
+
+  // Joueur local toujours en premier, les autres ensuite
+  const me = roomPlayers.find(p=>p.player_id===user.id);
+  const others = roomPlayers.filter(p=>p.player_id!==user.id);
+  const orderedPlayers = me ? [me, ...others] : roomPlayers;
+  const total = orderedPlayers.length;
+
+  function bjCard(e, idx, small=false) {
+    const c = e.card||e;
+    const faceUp = e.faceUp!==false;
+    const red = c&&(c.suit==="♥"||c.suit==="♦");
+    const W = small?28:36, H = small?40:52, FS = small?8:11;
+    if (!faceUp) return (
+      <div key={idx} style={{width:W,height:H,borderRadius:5,background:"linear-gradient(135deg,#1a1a2e,#16213e)",border:"1.5px solid #3a3a5c",flexShrink:0,boxShadow:"1px 2px 6px rgba(0,0,0,.6)"}}/>
+    );
+    return (
+      <div key={idx} style={{width:W,height:H,borderRadius:5,background:"#fff",border:"1.5px solid #ddd",
+        display:"flex",flexDirection:"column",justifyContent:"space-between",padding:"2px 2px",
+        flexShrink:0,boxShadow:"1px 2px 8px rgba(0,0,0,.6)"}}>
+        <div style={{fontSize:FS,fontWeight:800,color:red?"#c0392b":"#111",lineHeight:1.1}}>{c.rank}<br/>{c.suit}</div>
+        <div style={{fontSize:FS,fontWeight:800,color:red?"#c0392b":"#111",lineHeight:1.1,alignSelf:"flex-end",transform:"rotate(180deg)"}}>{c.rank}<br/>{c.suit}</div>
+      </div>
+    );
+  }
 
   return (
-    <div style={{display:"flex",flexDirection:"column",height:"100%",padding:"0 14px 14px"}}>
-      {/* Header */}
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0 6px"}}>
+    <div style={{display:"flex",flexDirection:"column",height:"100%",background:"#080812",fontFamily:"'SF Pro Display',-apple-system,sans-serif",color:"#fff"}}>
+
+      {/* Header compact */}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 14px 4px",flexShrink:0}}>
         <div>
-          <div style={{color:"#ffd700",fontSize:10,letterSpacing:2,textTransform:"uppercase"}}>Table #{room.code}</div>
-          <div style={{color:"#fff",fontSize:16,fontWeight:800}}>🪙 {user.tokens.toLocaleString()}</div>
+          <div style={{color:"#ffd700",fontSize:9,letterSpacing:2,textTransform:"uppercase"}}>♠ Table #{room.code} — {roomStatus==="waiting"?"Attente":roomStatus==="countdown"?"Démarrage...":roomStatus==="playing"?"En jeu":roomStatus==="finished"?"Terminé":"..."}</div>
+          <div style={{color:"#ffd700",fontSize:22,fontWeight:900}}>🪙 {user.tokens.toLocaleString()}</div>
         </div>
-        <button onClick={leaveRoom} style={{background:"transparent",border:"1px solid #2a2a3e",color:"#555",borderRadius:8,padding:"6px 12px",fontSize:12,cursor:"pointer"}}>Quitter</button>
+        <button onClick={leaveRoom} style={{background:"transparent",border:"1px solid #2a2a3e",color:"#555",borderRadius:8,padding:"5px 10px",fontSize:12,cursor:"pointer"}}>Quitter</button>
       </div>
 
-      {/* Table verte */}
-      <div style={{
-        flex:1,
-        background:"radial-gradient(ellipse at 50% 35%,#0f5535 0%,#0a3520 60%,#071e12 100%)",
-        borderRadius:16, padding:"10px 10px 6px",
-        border:"2px solid #1a6b40",
-        boxShadow:"inset 0 0 40px rgba(0,0,0,.5)",
-        display:"flex",flexDirection:"column",justifyContent:"space-between",
-        overflow:"hidden",
-      }}>
-        {/* Dealer */}
-        {dealerCards.length>0 && (
-          <div style={{marginBottom:6}}>
-            <div style={{color:"#9a9ab0",fontSize:10,letterSpacing:1,textTransform:"uppercase",marginBottom:4}}>
-              Croupier <span style={{color:"#ffd700",fontWeight:700}}>— {dealerScore}</span>
-            </div>
-            <div style={{display:"flex",gap:5}}>
-              {dealerCards.map((c,i)=>(
-                <AnimatedCard key={i} entry={{card:c.card||c, faceUp:c.faceUp!==false, visible:true}}/>
-              ))}
-            </div>
-          </div>
-        )}
+      {/* TABLE OVALE */}
+      <div style={{flex:1,position:"relative",overflow:"hidden",minHeight:0}}>
+        {/* Feutre vert */}
+        <div style={{position:"absolute",left:"6%",right:"6%",top:"3%",bottom:"3%",background:"radial-gradient(ellipse at 50% 50%,#1d7a30 0%,#0d4a1a 55%,#071808 100%)",borderRadius:"50%",border:"4px solid #0a3010",boxShadow:"inset 0 0 70px rgba(0,0,0,.65),0 0 20px rgba(0,0,0,.4)"}}/>
+        {/* Bordure bois */}
+        <div style={{position:"absolute",left:"3%",right:"3%",top:"0%",bottom:"0%",borderRadius:"50%",border:"9px solid #6b3810",boxShadow:"inset 0 0 0 2px #3a1e08,0 0 0 2px #8a5520",pointerEvents:"none"}}/>
 
-        {/* Message central */}
-        <div style={{textAlign:"center",minHeight:28,display:"flex",alignItems:"center",justifyContent:"center"}}>
-          {roomStatus==="waiting" && <div style={{color:"rgba(255,255,255,.2)",fontSize:12}}>En attente des joueurs…</div>}
+        {/* DEALER AU CENTRE */}
+        <div style={{position:"absolute",left:"50%",top:"38%",transform:"translate(-50%,-50%)",display:"flex",flexDirection:"column",alignItems:"center",gap:4,zIndex:10}}>
+          {/* Cartes dealer */}
+          {dealerCards.length>0 && (
+            <div style={{display:"flex",gap:4}}>
+              {dealerCards.map((c,i)=>bjCard(c,i,false))}
+            </div>
+          )}
+          {dealerCards.length===0 && roomStatus==="waiting" && (
+            <div style={{color:"rgba(255,255,255,.12)",fontSize:11,letterSpacing:2}}>🃏 BANQUE</div>
+          )}
+          {/* Score dealer */}
+          {dealerCards.length>0 && (
+            <div style={{background:"rgba(0,0,0,.7)",borderRadius:6,padding:"2px 10px",color:"#ffd700",fontSize:11,fontWeight:700,border:"1px solid rgba(255,215,0,.2)"}}>
+              Croupier — {dealerScore}
+            </div>
+          )}
+          {/* Message résultat / countdown */}
+          {roomStatus==="countdown" && countdown!==null && (
+            <div style={{fontSize:48,fontWeight:900,color:countdown<=3?"#e74c3c":"#ffd700",textShadow:`0 0 30px ${countdown<=3?"rgba(231,76,60,.8)":"rgba(255,215,0,.6)"}`,animation:countdown<=3?"pulse .5s ease-in-out infinite":"none",lineHeight:1}}>{countdown}</div>
+          )}
           {roomStatus==="finished" && myResult && (
-            <div style={{fontSize:15,fontWeight:900,color:"#ffd700",textShadow:"0 0 20px rgba(255,215,0,.6)",animation:"pulse 1s ease-in-out infinite"}}>
+            <div style={{background:"rgba(0,0,0,.85)",borderRadius:10,padding:"4px 14px",color:"#ffd700",fontSize:13,fontWeight:900,textAlign:"center",textShadow:"0 0 16px rgba(255,215,0,.6)",animation:"pulse 1s ease-in-out infinite",border:"1px solid rgba(255,215,0,.3)"}}>
               {myResult.map(r=>r.text).join(" · ")}
             </div>
           )}
         </div>
 
-        {/* Mains des joueurs */}
-        <div style={{display:"flex",flexDirection:"column",gap:4}}>
-          {roomPlayers.map(rp=>{
-            const isMe = rp.player_id===user.id;
-            const hands = rp.hands||[[]];
-            const cards = hands[0]||[];
-            const sc = cards.length>0?handScore(cards.map(e=>e.card||e)):null;
-            const bust = sc>21;
-            const isActive = rp.status==="playing" && roomStatus==="playing";
-            return (
-              <div key={rp.id} style={{
-                padding:"5px 8px", borderRadius:8,
-                background: isMe?"rgba(255,215,0,.06)":"rgba(0,0,0,.2)",
-                border:`1px solid ${isActive?"#ffd700":isMe?"#2a2a1e":"#1a1a1a"}`,
+        {/* JOUEURS EN CERCLE */}
+        {orderedPlayers.map((rp,idx)=>{
+          const isMe = rp.player_id===user.id;
+          const p = bjSeatPos(idx, total);
+          const hands = rp.hands||[[]];
+          const cards = hands[0]||[];
+          const sc = cards.length>0?handScore(cards.map(e=>e.card||e)):null;
+          const bust = sc>21;
+          const isActive = rp.status==="playing"&&roomStatus==="playing";
+          const isDone = rp.status==="done"||rp.status==="finished";
+          const result = rp.result;
+          return (
+            <div key={rp.id} style={{
+              position:"absolute",left:`${p.x}%`,top:`${p.y}%`,
+              transform:"translate(-50%,-50%)",zIndex:isActive?20:5,
+              display:"flex",flexDirection:"column",alignItems:"center",gap:2,
+              opacity:isDone&&!isMe?.7:1,transition:"opacity .3s",
+            }}>
+              {/* Cartes du joueur */}
+              {cards.length>0 && (
+                <div style={{display:"flex",gap:3,marginBottom:2}}>
+                  {cards.map((e,i)=>bjCard(e,i,!isMe))}
+                </div>
+              )}
+              {/* Badge joueur */}
+              <div style={{
+                background:isActive?"rgba(255,215,0,.15)":"rgba(0,0,0,.7)",
+                border:`2px solid ${isActive?"#ffd700":isMe?"#3a3a2e":"#1a1a1a"}`,
+                borderRadius:10,padding:"3px 8px",textAlign:"center",minWidth:58,
+                boxShadow:isActive?"0 0 16px rgba(255,215,0,.5)":"none",
+                transition:"all .2s",
               }}>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:3}}>
-                  <span style={{color:isMe?"#ffd700":"#888",fontSize:11,fontWeight:700}}>
-                    {isActive?"▶ ":""}{rp.players?.username||"?"}{isMe?" (moi)":""}
-                  </span>
-                  <span style={{color:"#555",fontSize:10}}>
-                    {rp.bet>0?`🪙 ${rp.bet}`:""} {sc!==null?`| ${sc}${bust?" 💥":""}`:""} 
-                    {rp.status==="done"?"✓":""}
-                    {rp.status==="finished"&&rp.result?rp.result.map(r=>r.text).join(" "):""} 
-                  </span>
+                <div style={{color:isMe?"#ffd700":"#ccc",fontSize:9,fontWeight:700,whiteSpace:"nowrap"}}>
+                  {isActive?"▶ ":""}{rp.players?.username||"?"}{isMe?" (moi)":""}
                 </div>
-                <div style={{display:"flex",gap:4}}>
-                  {cards.map((e,i)=>(
-                    <AnimatedCard key={i} entry={{card:e.card||e,faceUp:e.faceUp!==false,visible:true}} small/>
-                  ))}
-                </div>
+                {sc!==null && <div style={{color:bust?"#e74c3c":"#aaa",fontSize:9,fontWeight:700}}>{sc}{bust?" 💥":""}</div>}
+                {rp.bet>0 && <div style={{color:"rgba(255,215,0,.7)",fontSize:8}}>🪙{rp.bet}</div>}
+                {isDone && result && <div style={{color:"#4caf50",fontSize:8,fontWeight:700}}>{result[0]?.text||"✓"}</div>}
+                {rp.status==="waiting"&&roomStatus==="waiting"&&<div style={{color:"#555",fontSize:8}}>En attente…</div>}
+                {rp.status==="ready"&&roomStatus==="waiting"&&<div style={{color:"#4caf50",fontSize:8}}>✓ Prêt</div>}
               </div>
-            );
-          })}
-        </div>
+            </div>
+          );
+        })}
       </div>
 
       {/* Contrôles */}
-      <div style={{marginTop:10}}>
-        {/* ATTENTE — miser + timer */}
+      <div style={{padding:"8px 12px 12px",flexShrink:0}}>
         {(roomStatus==="waiting"||roomStatus==="countdown") && (
           <div>
-            {/* Champ de mise — visible tant que le timer n'a pas fini */}
             {roomStatus==="waiting" && myRp?.status==="waiting" && (
               <div style={{display:"flex",gap:6,marginBottom:8}}>
                 <div style={{position:"relative",flex:1}}>
                   <span style={{position:"absolute",left:10,top:"50%",transform:"translateY(-50%)",color:"#ffd700",fontSize:13}}>🪙</span>
-                  <input type="number" min="1" value={betInput}
-                    onChange={e=>setBetInput(e.target.value)}
+                  <input type="number" min="1" value={betInput} onChange={e=>setBetInput(e.target.value)}
                     style={{width:"100%",background:"#0e0e1e",border:"1.5px solid #2a2a3e",borderRadius:10,padding:"9px 10px 9px 28px",color:"#ffd700",fontSize:15,fontWeight:800,outline:"none",boxSizing:"border-box"}}/>
                 </div>
-                <button onClick={placeBet} style={{padding:"9px 16px",background:"linear-gradient(135deg,#ffd700,#ffaa00)",border:"none",borderRadius:10,fontSize:14,fontWeight:800,color:"#111",cursor:"pointer"}}>
-                  Miser ✓
-                </button>
+                <button onClick={placeBet} style={{padding:"9px 16px",background:"linear-gradient(135deg,#ffd700,#ffaa00)",border:"none",borderRadius:10,fontSize:14,fontWeight:800,color:"#111",cursor:"pointer"}}>Miser ✓</button>
               </div>
             )}
             {roomStatus==="waiting" && myRp?.status==="ready" && (
               <div style={{color:"#4caf50",textAlign:"center",fontSize:13,fontWeight:600,marginBottom:8}}>✓ Mise de {myRp.bet} 🪙 placée</div>
             )}
-
-            {/* Timer visible pour tout le monde */}
-            {roomStatus==="countdown" && countdown !== null && (
-              <div style={{textAlign:"center",marginBottom:10}}>
-                <div style={{
-                  fontSize:52, fontWeight:900,
-                  color: countdown <= 3 ? "#e74c3c" : "#ffd700",
-                  textShadow: `0 0 30px ${countdown<=3?"rgba(231,76,60,.8)":"rgba(255,215,0,.6)"}`,
-                  animation: countdown<=3?"pulse .5s ease-in-out infinite":"none",
-                  lineHeight:1,
-                }}>{countdown}</div>
-                <div style={{color:"#555",fontSize:12,marginTop:4}}>Distribution dans…</div>
-              </div>
+            {roomStatus==="countdown" && countdown!==null && (
+              <div style={{color:"#555",textAlign:"center",fontSize:12,marginBottom:6}}>Distribution dans…</div>
             )}
-
-            {/* Bouton démarrer le timer (hôte seulement) */}
             {isHost && roomStatus==="waiting" && (
-              <button onClick={startCountdown} style={{
-                width:"100%",padding:13,
-                background:"linear-gradient(135deg,#27ae60,#1e8449)",
-                border:"none",borderRadius:12,fontSize:15,fontWeight:900,
-                color:"#fff",cursor:"pointer",
-                boxShadow:"0 4px 16px rgba(39,174,96,.4)",
-              }}>
-                ⏱ Démarrer — 10 secondes ({roomPlayers.filter(p=>p.status==="ready").length}/{roomPlayers.length} ont misé)
+              <button onClick={startCountdown} style={{width:"100%",padding:13,background:"linear-gradient(135deg,#27ae60,#1e8449)",border:"none",borderRadius:12,fontSize:15,fontWeight:900,color:"#fff",cursor:"pointer",boxShadow:"0 4px 16px rgba(39,174,96,.4)"}}>
+                ⏱ Démarrer ({roomPlayers.filter(p=>p.status==="ready").length}/{roomPlayers.length} ont misé)
               </button>
             )}
             {!isHost && roomStatus==="waiting" && (
-              <div style={{color:"#444",textAlign:"center",fontSize:12,padding:6}}>En attente du créateur pour lancer…</div>
+              <div style={{color:"#444",textAlign:"center",fontSize:12,padding:6}}>En attente du créateur…</div>
             )}
           </div>
         )}
-
-        {/* JEU — hit/stand */}
         {roomStatus==="playing" && iAmPlaying && (
           <div style={{display:"flex",gap:8}}>
             <button onClick={hit} style={{flex:1,padding:13,borderRadius:12,fontSize:15,fontWeight:800,border:"none",background:"linear-gradient(135deg,#27ae60,#1e8449)",color:"#fff",cursor:"pointer",boxShadow:"0 4px 14px rgba(39,174,96,.35)"}}>HIT</button>
@@ -1447,13 +1461,9 @@ function RoomScreen({ user, roomId, isHost: initIsHost, onLeave, onUpdateTokens 
         {roomStatus==="playing" && iAmDone && (
           <div style={{color:"#4caf50",textAlign:"center",fontSize:13,fontWeight:600,padding:8}}>✓ En attente des autres joueurs…</div>
         )}
-
-        {/* FIN — rejouer */}
         {roomStatus==="finished" && (
           <div style={{display:"flex",gap:8}}>
-            {isHost && (
-              <button onClick={newGame} style={{flex:1,padding:13,borderRadius:12,fontSize:14,fontWeight:800,border:"none",background:"linear-gradient(135deg,#ffd700,#ffaa00)",color:"#111",cursor:"pointer"}}>↺ Nouvelle partie</button>
-            )}
+            {isHost && <button onClick={newGame} style={{flex:1,padding:13,borderRadius:12,fontSize:14,fontWeight:800,border:"none",background:"linear-gradient(135deg,#ffd700,#ffaa00)",color:"#111",cursor:"pointer"}}>↺ Rejouer</button>}
             <button onClick={leaveRoom} style={{flex:1,padding:13,borderRadius:12,fontSize:14,fontWeight:800,border:"1px solid #333",background:"transparent",color:"#888",cursor:"pointer"}}>Quitter</button>
           </div>
         )}
