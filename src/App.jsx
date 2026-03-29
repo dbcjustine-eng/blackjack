@@ -1102,8 +1102,12 @@ function RoomScreen({ user, roomId, isHost: initIsHost, onLeave, onUpdateTokens 
         setRoomPlayers(prev => {
           const exists = prev.find(p=>p.id===payload.new.id);
           if (payload.eventType==="DELETE") return prev.filter(p=>p.id!==payload.new.id);
-          if (exists) return prev.map(p=>p.id===payload.new.id?payload.new:p);
-          return [...prev, payload.new];
+          // Conserver la jointure players(username) qui n'est pas dans le payload realtime
+          const merged = {...payload.new, players: exists?.players ?? payload.new.players};
+          if (exists) return prev.map(p=>p.id===payload.new.id ? merged : p);
+          // Nouveau joueur : recharger pour avoir la jointure
+          loadRoomPlayers();
+          return prev;
         });
         if (payload.new.player_id===user.id) setMyRp(payload.new);
       })
@@ -1148,21 +1152,21 @@ function RoomScreen({ user, roomId, isHost: initIsHost, onLeave, onUpdateTokens 
   // ── Lancer la partie (hôte seulement, appelé automatiquement après timer) ──
   async function startGame() {
     if (!isHost) return;
-    const readyPlayers = roomPlayers.filter(p=>p.status==="ready"||p.status==="playing");
+    // Recharger les joueurs depuis la DB pour avoir la liste à jour
+    const { data: freshPlayers } = await supabase.from("room_players")
+      .select("*, players(username,tokens)").eq("room_id",roomId).order("seat");
+    const readyPlayers = (freshPlayers||[]).filter(p=>p.status==="ready"||p.status==="waiting");
     if (readyPlayers.length===0) return;
 
     const deck = freshDeck();
-    // Distribuer 2 cartes à chaque joueur et 2 au dealer (1 cachée)
     const d1 = deck.pop(), dealer_hidden = deck.pop();
-    const d2 = deck.pop();
 
-    // Dealer : 1 face visible, 1 cachée
     const dealerCards = [
       {...d1, faceUp:true},
       {...dealer_hidden, faceUp:false},
     ];
 
-    // Distribuer aux joueurs
+    // Distribuer aux joueurs un par un
     for (const rp of readyPlayers) {
       const c1 = deck.pop(), c2 = deck.pop();
       await supabase.from("room_players").update({
@@ -1172,11 +1176,15 @@ function RoomScreen({ user, roomId, isHost: initIsHost, onLeave, onUpdateTokens 
       }).eq("id",rp.id);
     }
 
+    // Mettre à jour la room en dernier — ça déclenche le realtime pour tout le monde
     await supabase.from("rooms").update({
       status:"playing",
       dealer_cards: dealerCards,
       deck: deck,
     }).eq("id",roomId);
+
+    // Recharger explicitement les joueurs pour s'assurer que tout le monde a ses cartes
+    await loadRoomPlayers();
   }
 
   // ── Hit ──
@@ -1208,8 +1216,13 @@ function RoomScreen({ user, roomId, isHost: initIsHost, onLeave, onUpdateTokens 
   // ── Vérifier si tout le monde a joué → dealer joue ──
   async function checkAllDone() {
     const { data: allRp } = await supabase.from("room_players").select("status").eq("room_id",roomId);
-    const allDone = allRp?.every(p=>p.status==="done"||p.status==="waiting");
-    if (allDone && isHost) await dealerPlay();
+    const allDone = allRp?.every(p=>p.status==="done"||p.status==="waiting"||p.status==="finished");
+    if (!allDone) return;
+    // Vérifier que la room est encore en "playing" (pas déjà en train de finaliser)
+    const { data: freshRoom } = await supabase.from("rooms").select("status,host_id").eq("id",roomId).single();
+    if (!freshRoom || freshRoom.status!=="playing") return;
+    // Seul l'hôte lance dealerPlay pour éviter les doublons
+    if (freshRoom.host_id === user.id) await dealerPlay();
   }
 
   // ── Dealer joue (hôte seulement) ──
@@ -1336,7 +1349,7 @@ function RoomScreen({ user, roomId, isHost: initIsHost, onLeave, onUpdateTokens 
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 14px 4px",flexShrink:0}}>
         <div>
           <div style={{color:"#ffd700",fontSize:9,letterSpacing:2,textTransform:"uppercase"}}>♠ Table #{room.code} — {roomStatus==="waiting"?"Attente":roomStatus==="countdown"?"Démarrage...":roomStatus==="playing"?"En jeu":roomStatus==="finished"?"Terminé":"..."}</div>
-          <div style={{color:"#ffd700",fontSize:22,fontWeight:900}}>🪙 {user.tokens.toLocaleString()}</div>
+          <div style={{color:"#ffd700",fontSize:26,fontWeight:900,lineHeight:1}}>🪙 {user.tokens.toLocaleString()}</div>
         </div>
         <button onClick={leaveRoom} style={{background:"transparent",border:"1px solid #2a2a3e",color:"#555",borderRadius:8,padding:"5px 10px",fontSize:12,cursor:"pointer"}}>Quitter</button>
       </div>
@@ -1412,7 +1425,7 @@ function RoomScreen({ user, roomId, isHost: initIsHost, onLeave, onUpdateTokens 
                   {isActive?"▶ ":""}{rp.players?.username||"?"}{isMe?" (moi)":""}
                 </div>
                 {sc!==null && <div style={{color:bust?"#e74c3c":"#aaa",fontSize:9,fontWeight:700}}>{sc}{bust?" 💥":""}</div>}
-                {rp.bet>0 && <div style={{color:"rgba(255,215,0,.7)",fontSize:8}}>🪙{rp.bet}</div>}
+                {rp.bet>0 && <div style={{color:"rgba(255,215,0,.7)",fontSize:8}}>Mise: {rp.bet}</div>}
                 {isDone && result && <div style={{color:"#4caf50",fontSize:8,fontWeight:700}}>{result[0]?.text||"✓"}</div>}
                 {rp.status==="waiting"&&roomStatus==="waiting"&&<div style={{color:"#555",fontSize:8}}>En attente…</div>}
                 {rp.status==="ready"&&roomStatus==="waiting"&&<div style={{color:"#4caf50",fontSize:8}}>✓ Prêt</div>}
