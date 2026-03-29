@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { supabase } from "./supabase.js";
-import { PokerLobby, PokerRoom } from "./Poker.jsx";
+import { PokerLobby, PokerRoom, PokerSoloBots } from "./Poker.jsx";
 
 // ── TRANSACTION LOGGER ────────────────────────────────────────────────────────
 export async function logTransaction(playerId, type, amount, description, balanceAfter) {
@@ -1525,6 +1525,7 @@ export default function App() {
   const [screen,      setScreen]      = useState("lobby"); // lobby | solo | room | poker-lobby | poker-room
   const [roomId,      setRoomId]      = useState(null);
   const [pokerRoomId, setPokerRoomId] = useState(null);
+  const [pokerBotCount,setPokerBotCount]= useState(3);
   const [isHost,      setIsHost]      = useState(false);
 
   async function updateTokens(delta, description = "") {
@@ -1568,10 +1569,13 @@ export default function App() {
           <RoomScreen user={currentUser} roomId={roomId} isHost={isHost} onLeave={()=>setScreen("lobby")} onUpdateTokens={updateTokens}/>
         )}
         {currentUser && !currentUser.is_admin && screen==="poker-lobby" && (
-          <PokerLobby user={currentUser} onEnterRoom={id=>{setPokerRoomId(id);setScreen("poker-room");}} onBack={()=>setScreen("lobby")}/>
+          <PokerLobby user={currentUser} onEnterRoom={id=>{setPokerRoomId(id);setScreen("poker-room");}} onSoloBots={n=>{setPokerBotCount(n);setScreen("poker-solo-bots");}} onBack={()=>setScreen("lobby")}/>
         )}
         {currentUser && !currentUser.is_admin && screen==="poker-room" && pokerRoomId && (
           <PokerRoom user={currentUser} roomId={pokerRoomId} onLeave={()=>setScreen("poker-lobby")} onUpdateTokens={updateTokens}/>
+        )}
+        {currentUser && !currentUser.is_admin && screen==="poker-solo-bots" && (
+          <PokerSoloBots user={currentUser} botCount={pokerBotCount} onBack={()=>setScreen("poker-lobby")} onUpdateTokens={updateTokens}/>
         )}
       </div>
 
