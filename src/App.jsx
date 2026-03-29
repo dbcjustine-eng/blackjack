@@ -1043,296 +1043,228 @@ function LobbyScreen({ user, onEnterRoom, onSolo, onPoker, onLogout }) {
   );
 }
 
-// ── ROOM SCREEN (salle d'attente + jeu multijoueur) ──────────────────────────
+// ── ROOM SCREEN ───────────────────────────────────────────────────────────────
 function RoomScreen({ user, roomId, isHost: initIsHost, onLeave, onUpdateTokens }) {
   const [room,        setRoom]        = useState(null);
   const [roomPlayers, setRoomPlayers] = useState([]);
   const [myRp,        setMyRp]        = useState(null);
   const [betInput,    setBetInput]    = useState("10");
-  const [msg,         setMsg]         = useState("");
-  const [dealerEntries, setDealerEntries] = useState([]);
-  const [localHands,  setLocalHands]  = useState([]);
-  const [phase,       setPhase]       = useState("loading");
-  const [countdown,   setCountdown]   = useState(null); // null | 10..1
   const busy = useRef(false);
-  const countdownRef = useRef(null);
 
   const isHost = room?.host_id === user.id;
 
-  // Timer: quand room.status passe à "countdown", tout le monde voit le décompte
+  // ── Realtime + chargement ──────────────────────────────────────────────────
   useEffect(() => {
-    if (room?.status === "countdown" && room?.countdown_end) {
-      // Calcule le temps restant basé sur countdown_end stocké en DB
-      function tick() {
-        const remaining = Math.ceil((new Date(room.countdown_end) - new Date()) / 1000);
-        if (remaining <= 0) {
-          setCountdown(0);
-          clearInterval(countdownRef.current);
-          // L'hôte déclenche startGame quand le timer atteint 0
-          if (room?.host_id === user.id && !busy.current) {
-            busy.current = true;
-            startGame().then(() => { busy.current = false; });
-          }
-        } else {
-          setCountdown(remaining);
-        }
-      }
-      clearInterval(countdownRef.current);
-      tick();
-      countdownRef.current = setInterval(tick, 500);
-      return () => clearInterval(countdownRef.current);
-    } else {
-      clearInterval(countdownRef.current);
-      setCountdown(null);
-    }
-  }, [room?.status, room?.countdown_end]);
-
-  // ── chargement initial ──
-  useEffect(() => {
-    loadRoom();
-    loadRoomPlayers();
-
-    // Realtime subscriptions
-    const roomSub = supabase.channel("room-"+roomId)
-      .on("postgres_changes", { event:"*", schema:"public", table:"rooms", filter:`id=eq.${roomId}` }, payload => {
-        setRoom(payload.new);
-        syncDealerEntries(payload.new.dealer_cards || []);
+    loadRoom(); loadRoomPlayers();
+    const sub = supabase.channel("room-"+roomId)
+      .on("postgres_changes",{event:"*",schema:"public",table:"rooms",filter:`id=eq.${roomId}`}, p => {
+        setRoom(p.new);
       })
-      .on("postgres_changes", { event:"*", schema:"public", table:"room_players", filter:`room_id=eq.${roomId}` }, payload => {
+      .on("postgres_changes",{event:"*",schema:"public",table:"room_players",filter:`room_id=eq.${roomId}`}, p => {
+        if (p.eventType==="DELETE") { setRoomPlayers(prev=>prev.filter(x=>x.id!==p.old?.id)); return; }
         setRoomPlayers(prev => {
-          const exists = prev.find(p=>p.id===payload.new.id);
-          if (payload.eventType==="DELETE") return prev.filter(p=>p.id!==payload.new.id);
-          // Conserver la jointure players(username) qui n'est pas dans le payload realtime
-          const merged = {...payload.new, players: exists?.players ?? payload.new.players};
-          if (exists) return prev.map(p=>p.id===payload.new.id ? merged : p);
-          // Nouveau joueur : recharger pour avoir la jointure
-          loadRoomPlayers();
+          const exists = prev.find(x=>x.id===p.new.id);
+          const merged = {...p.new, players: exists?.players ?? p.new.players};
+          if (exists) return prev.map(x=>x.id===p.new.id ? merged : x);
+          loadRoomPlayers(); // nouveau joueur → recharger pour avoir le username
           return prev;
         });
-        if (payload.new.player_id===user.id) setMyRp(payload.new);
+        if (p.new.player_id===user.id) setMyRp(p.new);
       })
       .subscribe();
-
-    return () => supabase.removeChannel(roomSub);
+    return () => supabase.removeChannel(sub);
   }, [roomId]);
-
-  // Sync dealer entries (sans animation pour les autres joueurs)
-  function syncDealerEntries(cards) {
-    setDealerEntries(cards.map(c=>({card:c, faceUp:c.faceUp!==false, visible:true})));
-  }
 
   async function loadRoom() {
     const { data } = await supabase.from("rooms").select("*").eq("id",roomId).single();
-    if (data) { setRoom(data); syncDealerEntries(data.dealer_cards||[]); setPhase(data.status); }
+    if (data) setRoom(data);
   }
   async function loadRoomPlayers() {
     const { data } = await supabase.from("room_players").select("*, players(username,tokens)").eq("room_id",roomId).order("seat");
-    if (data) {
-      setRoomPlayers(data);
-      const me = data.find(p=>p.player_id===user.id);
-      if (me) setMyRp(me);
-    }
+    if (data) { setRoomPlayers(data); const me=data.find(p=>p.player_id===user.id); if(me) setMyRp(me); }
   }
 
-  // ── Mise ──
+  // ── Mise ──────────────────────────────────────────────────────────────────
   async function placeBet() {
     const b = parseInt(betInput)||0;
-    if (b<1 || b>user.tokens) return;
-    await supabase.from("room_players").update({bet:b, status:"ready"}).eq("id",myRp.id);
-    onUpdateTokens(-b, "");
+    if (b<1||b>user.tokens||!myRp) return;
+    await supabase.from("room_players").update({bet:b,status:"ready"}).eq("id",myRp.id);
+    onUpdateTokens(-b,"");
   }
 
-  // ── Démarrer le compte à rebours (hôte seulement) ──
-  async function startCountdown() {
-    if (!isHost) return;
-    const countdownEnd = new Date(Date.now() + 10000).toISOString();
-    await supabase.from("rooms").update({ status:"countdown", countdown_end: countdownEnd }).eq("id",roomId);
-  }
-
-  // ── Lancer la partie (hôte seulement, appelé automatiquement après timer) ──
+  // ── Lancer la partie (hôte seulement) ────────────────────────────────────
   async function startGame() {
-    if (!isHost) return;
-    // Recharger les joueurs depuis la DB pour avoir la liste à jour
+    if (!isHost||busy.current) return;
+    busy.current=true;
     const { data: freshPlayers } = await supabase.from("room_players")
       .select("*, players(username,tokens)").eq("room_id",roomId).order("seat");
-    const readyPlayers = (freshPlayers||[]).filter(p=>p.status==="ready"||p.status==="waiting");
-    if (readyPlayers.length===0) return;
+    const active = (freshPlayers||[]).filter(p=>p.status==="ready"||p.status==="waiting");
+    if (active.length===0) { busy.current=false; return; }
 
     const deck = freshDeck();
-    const d1 = deck.pop(), dealer_hidden = deck.pop();
+    const d1=deck.pop(), dHidden=deck.pop();
+    const dealerCards=[{...d1,faceUp:true},{...dHidden,faceUp:false}];
 
-    const dealerCards = [
-      {...d1, faceUp:true},
-      {...dealer_hidden, faceUp:false},
-    ];
-
-    // Distribuer aux joueurs un par un
-    for (const rp of readyPlayers) {
-      const c1 = deck.pop(), c2 = deck.pop();
+    // Distribuer + assigner siège de jeu (seat order)
+    for (const rp of active) {
+      const c1=deck.pop(), c2=deck.pop();
       await supabase.from("room_players").update({
-        hands: [[{card:c1,faceUp:true,visible:true},{card:c2,faceUp:true,visible:true}]],
-        active_hand: 0,
-        status: "playing",
+        hands:[[{card:c1,faceUp:true,visible:true},{card:c2,faceUp:true,visible:true}]],
+        active_hand:0, status:"playing",
       }).eq("id",rp.id);
     }
 
-    // Mettre à jour la room en dernier — ça déclenche le realtime pour tout le monde
+    // action_seat = seat du premier joueur (siège 0 ou le plus petit)
+    const firstSeat = Math.min(...active.map(p=>p.seat));
     await supabase.from("rooms").update({
-      status:"playing",
-      dealer_cards: dealerCards,
-      deck: deck,
+      status:"playing", dealer_cards:dealerCards, deck, action_seat:firstSeat,
     }).eq("id",roomId);
 
-    // Recharger explicitement les joueurs pour s'assurer que tout le monde a ses cartes
     await loadRoomPlayers();
+    busy.current=false;
   }
 
-  // ── Hit ──
+  // ── Avancer au prochain joueur ────────────────────────────────────────────
+  async function advanceToNext(currentSeat) {
+    const { data: allRp } = await supabase.from("room_players")
+      .select("seat,status").eq("room_id",roomId).order("seat");
+    const stillPlaying = (allRp||[]).filter(p=>p.status==="playing"&&p.seat!==currentSeat);
+    if (stillPlaying.length===0) {
+      // Tout le monde a joué → dealer joue
+      const { data: freshRoom } = await supabase.from("rooms").select("status,host_id").eq("id",roomId).single();
+      if (freshRoom?.status==="playing" && freshRoom?.host_id===user.id) {
+        await dealerPlay();
+      } else if (freshRoom?.status==="playing") {
+        // Si non-hôte est le dernier → l'hôte doit quand même déclencher
+        // On met un statut intermédiaire pour signaler que c'est l'hôte qui doit agir
+        await supabase.from("rooms").update({action_seat:-1}).eq("id",roomId);
+      }
+    } else {
+      // Prochain siège actif après currentSeat
+      const sorted = stillPlaying.map(p=>p.seat).sort((a,b)=>a-b);
+      const next = sorted.find(s=>s>currentSeat) ?? sorted[0];
+      await supabase.from("rooms").update({action_seat:next}).eq("id",roomId);
+    }
+  }
+
+  // Surveiller action_seat=-1 → l'hôte lance dealerPlay
+  useEffect(()=>{
+    if (room?.action_seat===-1 && room?.status==="playing" && isHost && !busy.current) {
+      busy.current=true;
+      dealerPlay().then(()=>{ busy.current=false; });
+    }
+  },[room?.action_seat, room?.status, isHost]);
+
+  // ── Hit ───────────────────────────────────────────────────────────────────
   async function hit() {
-    if (!myRp || myRp.status!=="playing" || busy.current) return;
-    busy.current = true;
-    const { data: freshRoom } = await supabase.from("rooms").select("deck").eq("id",roomId).single();
-    const deck = freshRoom.deck;
-    const c = deck.pop();
-    const hands = JSON.parse(JSON.stringify(myRp.hands));
+    if (!myRp||myRp.status!=="playing"||room?.action_seat!==myRp.seat||busy.current) return;
+    busy.current=true;
+    const { data: fr } = await supabase.from("rooms").select("deck").eq("id",roomId).single();
+    const deck=[...(fr.deck||[])];
+    const c=deck.pop();
+    const hands=JSON.parse(JSON.stringify(myRp.hands));
     hands[myRp.active_hand].push({card:c,faceUp:true,visible:true});
-    const score = handScore(hands[myRp.active_hand].map(e=>e.card));
-    const newStatus = score>=21?"done":"playing";
-    await supabase.from("room_players").update({hands, status:newStatus}).eq("id",myRp.id);
+    const score=handScore(hands[myRp.active_hand].map(e=>e.card));
+    const newStatus=score>=21?"done":"playing";
+    await supabase.from("room_players").update({hands,status:newStatus}).eq("id",myRp.id);
     await supabase.from("rooms").update({deck}).eq("id",roomId);
-    if (score>=21) await checkAllDone();
-    busy.current = false;
+    if (newStatus==="done") await advanceToNext(myRp.seat);
+    busy.current=false;
   }
 
-  // ── Stand ──
+  // ── Stand ─────────────────────────────────────────────────────────────────
   async function stand() {
-    if (!myRp || myRp.status!=="playing" || busy.current) return;
-    busy.current = true;
+    if (!myRp||myRp.status!=="playing"||room?.action_seat!==myRp.seat||busy.current) return;
+    busy.current=true;
     await supabase.from("room_players").update({status:"done"}).eq("id",myRp.id);
-    await checkAllDone();
-    busy.current = false;
+    await advanceToNext(myRp.seat);
+    busy.current=false;
   }
 
-  // ── Vérifier si tout le monde a joué → dealer joue ──
-  async function checkAllDone() {
-    const { data: allRp } = await supabase.from("room_players").select("status").eq("room_id",roomId);
-    const allDone = allRp?.every(p=>p.status==="done"||p.status==="waiting"||p.status==="finished");
-    if (!allDone) return;
-    // Vérifier que la room est encore en "playing" (pas déjà en train de finaliser)
-    const { data: freshRoom } = await supabase.from("rooms").select("status,host_id").eq("id",roomId).single();
-    if (!freshRoom || freshRoom.status!=="playing") return;
-    // Seul l'hôte lance dealerPlay pour éviter les doublons
-    if (freshRoom.host_id === user.id) await dealerPlay();
-  }
-
-  // ── Dealer joue (hôte seulement) ──
+  // ── Dealer joue ───────────────────────────────────────────────────────────
   async function dealerPlay() {
-    const { data: freshRoom } = await supabase.from("rooms").select("*").eq("id",roomId).single();
-    let dealer = [...(freshRoom.dealer_cards||[])];
-    let deck = [...(freshRoom.deck||[])];
-
-    // Retourner la carte cachée
-    dealer = dealer.map(c=>({...c,faceUp:true}));
-    await supabase.from("rooms").update({dealer_cards:dealer}).eq("id",roomId);
+    const { data: fr } = await supabase.from("rooms").select("*").eq("id",roomId).single();
+    let dealer=[...(fr.dealer_cards||[])];
+    let deck=[...(fr.deck||[])];
+    dealer=dealer.map(c=>({...c,faceUp:true}));
+    await supabase.from("rooms").update({dealer_cards:dealer,action_seat:-2}).eq("id",roomId);
     await sleep(600);
-
-    // Meilleur score joueur non busté (pour riggedPop)
-    const { data: allRp } = await supabase.from("room_players").select("hands").eq("room_id",roomId);
-    const bestPlayerScore = allRp?.flatMap(rp=>rp.hands)
-      .map(h=>handScore(h.map(e=>e.card)))
-      .filter(s=>s<=21)
-      .reduce((a,b)=>Math.max(a,b),0) || 0;
-
-    const dealerCards = dealer.map(c=>c.card||c);
-    while (handScore(dealerCards)<17) {
-      const c = riggedPop(deck, dealerCards, 0);
+    const dealerCards=dealer.map(c=>c.card||c);
+    while(handScore(dealerCards)<17){
+      const c=riggedPop(deck,dealerCards,0);
       dealerCards.push(c);
       dealer.push({card:c,faceUp:true,visible:true});
       await supabase.from("rooms").update({dealer_cards:dealer,deck}).eq("id",roomId);
       await sleep(700);
     }
-
-    // Calculer résultats pour chaque joueur
-    const ds = handScore(dealerCards);
+    const ds=handScore(dealerCards);
     const { data: finalRp } = await supabase.from("room_players").select("*, players(username)").eq("room_id",roomId);
     for (const rp of finalRp||[]) {
-      if (rp.status==="waiting") continue;
-      const results = rp.hands.map(hand=>{
-        const cards = hand.map(e=>e.card||e);
-        const ps = handScore(cards);
-        const isBJ = cards.length===2&&ps===21&&rp.hands.length===1;
-        if (isBJ)               return {text:"🎰 Blackjack!", gain: rp.bet*2.5};
-        if (ps>21)              return {text:"💥 Bust", gain:0};
-        if (ds>21||ps>ds)       return {text:"✅ Gagné!", gain: rp.bet*2};
-        if (ps===ds)            return {text:"🤝 Égalité", gain: rp.bet};
-        return                         {text:"❌ Perdu", gain:0};
+      if(rp.status==="waiting") continue;
+      const results=rp.hands.map(hand=>{
+        const cards=hand.map(e=>e.card||e);
+        const ps=handScore(cards);
+        const isBJ=cards.length===2&&ps===21&&rp.hands.length===1;
+        if(isBJ) return {text:"🎰 Blackjack!",gain:rp.bet*2.5};
+        if(ps>21) return {text:"💥 Bust",gain:0};
+        if(ds>21||ps>ds) return {text:"✅ Gagné!",gain:rp.bet*2};
+        if(ps===ds) return {text:"🤝 Égalité",gain:rp.bet};
+        return {text:"❌ Perdu",gain:0};
       });
-      const totalGain = results.reduce((a,r)=>a+r.gain,0);
-      // Mettre à jour les tokens directement
+      const totalGain=results.reduce((a,r)=>a+r.gain,0);
       const { data: pl } = await supabase.from("players").select("tokens").eq("id",rp.player_id).single();
-      if (pl) {
-        const newTokens = Math.max(0, pl.tokens + totalGain);
+      if(pl){
+        const newTokens=Math.max(0,pl.tokens+totalGain);
         await supabase.from("players").update({tokens:newTokens}).eq("id",rp.player_id);
-        const desc = results.map(r=>r.text).join(" · ");
-        await logTransaction(rp.player_id,"game",totalGain-rp.bet,desc,newTokens);
+        await logTransaction(rp.player_id,"game",totalGain-rp.bet,results.map(r=>r.text).join(" · "),newTokens);
       }
-      await supabase.from("room_players").update({result:results, status:"finished"}).eq("id",rp.id);
+      await supabase.from("room_players").update({result:results,status:"finished"}).eq("id",rp.id);
     }
-
     await supabase.from("rooms").update({status:"finished"}).eq("id",roomId);
   }
 
   async function leaveRoom() {
     await supabase.from("room_players").delete().eq("room_id",roomId).eq("player_id",user.id);
-    if (isHost) await supabase.from("rooms").delete().eq("id",roomId);
+    if(isHost) await supabase.from("rooms").delete().eq("id",roomId);
     onLeave();
   }
 
   async function newGame() {
-    // Réinitialiser pour une nouvelle partie
-    await supabase.from("room_players").update({
-      hands:[[]], bet:0, status:"waiting", result:[], active_hand:0
-    }).eq("room_id",roomId);
-    await supabase.from("rooms").update({
-      status:"waiting", dealer_cards:[], deck:freshDeck()
-    }).eq("id",roomId);
+    await supabase.from("room_players").update({hands:[[]],bet:0,status:"waiting",result:[],active_hand:0}).eq("room_id",roomId);
+    await supabase.from("rooms").update({status:"waiting",dealer_cards:[],deck:freshDeck(),action_seat:0}).eq("id",roomId);
   }
 
-  if (!room) return <div style={{color:"#555",textAlign:"center",marginTop:100}}>Chargement…</div>;
+  if (!room) return <div style={{color:"#555",textAlign:"center",marginTop:100,fontSize:14}}>Chargement…</div>;
 
-  const roomStatus = room.status;
-  const myResult = myRp?.result;
-  const myBet = myRp?.bet || 0;
-  const dealerCards = (room.dealer_cards||[]);
-  const dealerScore = dealerCards.every(c=>c.faceUp!==false)
+  const roomStatus=room.status;
+  const myResult=myRp?.result;
+  const dealerCards=room.dealer_cards||[];
+  const dealerScore=dealerCards.every(c=>c.faceUp!==false)
     ? handScore(dealerCards.map(c=>c.card||c))
     : dealerCards.filter(c=>c.faceUp!==false).length>0
       ? handScore(dealerCards.filter(c=>c.faceUp!==false).map(c=>c.card||c))+"+" : "?";
-  const iAmPlaying = myRp?.status==="playing";
+
+  const isMyTurn = room?.action_seat===myRp?.seat && myRp?.status==="playing" && roomStatus==="playing";
   const iAmDone = myRp?.status==="done"||myRp?.status==="finished";
 
-  // Positions en cercle autour de la table ovale
-  function bjSeatPos(idx, total) {
-    // idx 0 = joueur local (bas), idx 1..n = autres joueurs (autour)
-    const angle = (Math.PI/2) + (2*Math.PI*idx/total);
-    return { x: 50 + 42*Math.cos(angle), y: 42 + 33*Math.sin(angle) };
+  function bjSeatPos(idx,total){
+    const angle=(Math.PI/2)+(2*Math.PI*idx/total);
+    return{x:50+42*Math.cos(angle),y:42+33*Math.sin(angle)};
   }
 
-  // Joueur local toujours en premier, les autres ensuite
-  const me = roomPlayers.find(p=>p.player_id===user.id);
-  const others = roomPlayers.filter(p=>p.player_id!==user.id);
-  const orderedPlayers = me ? [me, ...others] : roomPlayers;
-  const total = orderedPlayers.length;
+  const me=roomPlayers.find(p=>p.player_id===user.id);
+  const others=roomPlayers.filter(p=>p.player_id!==user.id).sort((a,b)=>a.seat-b.seat);
+  const orderedPlayers=me?[me,...others]:roomPlayers;
+  const total=orderedPlayers.length;
 
-  function bjCard(e, idx, small=false) {
-    const c = e.card||e;
-    const faceUp = e.faceUp!==false;
-    const red = c&&(c.suit==="♥"||c.suit==="♦");
-    const W = small?28:36, H = small?40:52, FS = small?8:11;
-    if (!faceUp) return (
+  function bjCard(e,idx,small=false){
+    const c=e.card||e, faceUp=e.faceUp!==false;
+    const red=c&&(c.suit==="♥"||c.suit==="♦");
+    const W=small?28:36,H=small?40:52,FS=small?8:11;
+    if(!faceUp) return(
       <div key={idx} style={{width:W,height:H,borderRadius:5,background:"linear-gradient(135deg,#1a1a2e,#16213e)",border:"1.5px solid #3a3a5c",flexShrink:0,boxShadow:"1px 2px 6px rgba(0,0,0,.6)"}}/>
     );
-    return (
+    return(
       <div key={idx} style={{width:W,height:H,borderRadius:5,background:"#fff",border:"1.5px solid #ddd",
         display:"flex",flexDirection:"column",justifyContent:"space-between",padding:"2px 2px",
         flexShrink:0,boxShadow:"1px 2px 8px rgba(0,0,0,.6)"}}>
@@ -1342,92 +1274,89 @@ function RoomScreen({ user, roomId, isHost: initIsHost, onLeave, onUpdateTokens 
     );
   }
 
-  return (
+  // Ordre de jeu affiché
+  const playOrder=roomPlayers.filter(p=>p.status!=="waiting").sort((a,b)=>a.seat-b.seat);
+
+  return(
     <div style={{display:"flex",flexDirection:"column",height:"100%",background:"#080812",fontFamily:"'SF Pro Display',-apple-system,sans-serif",color:"#fff"}}>
 
-      {/* Header compact */}
+      {/* Header */}
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 14px 4px",flexShrink:0}}>
         <div>
-          <div style={{color:"#ffd700",fontSize:9,letterSpacing:2,textTransform:"uppercase"}}>♠ Table #{room.code} — {roomStatus==="waiting"?"Attente":roomStatus==="countdown"?"Démarrage...":roomStatus==="playing"?"En jeu":roomStatus==="finished"?"Terminé":"..."}</div>
+          <div style={{color:"#ffd700",fontSize:9,letterSpacing:2,textTransform:"uppercase"}}>
+            ♠ Table #{room.code} — {roomStatus==="waiting"?"Attente":roomStatus==="playing"?"En jeu":roomStatus==="finished"?"Terminé":"..."}
+          </div>
           <div style={{color:"#ffd700",fontSize:26,fontWeight:900,lineHeight:1}}>🪙 {user.tokens.toLocaleString()}</div>
         </div>
         <button onClick={leaveRoom} style={{background:"transparent",border:"1px solid #2a2a3e",color:"#555",borderRadius:8,padding:"5px 10px",fontSize:12,cursor:"pointer"}}>Quitter</button>
       </div>
 
-      {/* TABLE OVALE */}
+      {/* Table ovale */}
       <div style={{flex:1,position:"relative",overflow:"hidden",minHeight:0}}>
-        {/* Feutre vert */}
-        <div style={{position:"absolute",left:"6%",right:"6%",top:"3%",bottom:"3%",background:"radial-gradient(ellipse at 50% 50%,#1d7a30 0%,#0d4a1a 55%,#071808 100%)",borderRadius:"50%",border:"4px solid #0a3010",boxShadow:"inset 0 0 70px rgba(0,0,0,.65),0 0 20px rgba(0,0,0,.4)"}}/>
-        {/* Bordure bois */}
+        <div style={{position:"absolute",left:"6%",right:"6%",top:"3%",bottom:"3%",background:"radial-gradient(ellipse at 50% 50%,#1d7a30 0%,#0d4a1a 55%,#071808 100%)",borderRadius:"50%",border:"4px solid #0a3010",boxShadow:"inset 0 0 70px rgba(0,0,0,.65)"}}/>
         <div style={{position:"absolute",left:"3%",right:"3%",top:"0%",bottom:"0%",borderRadius:"50%",border:"9px solid #6b3810",boxShadow:"inset 0 0 0 2px #3a1e08,0 0 0 2px #8a5520",pointerEvents:"none"}}/>
 
-        {/* DEALER AU CENTRE */}
+        {/* Dealer au centre */}
         <div style={{position:"absolute",left:"50%",top:"38%",transform:"translate(-50%,-50%)",display:"flex",flexDirection:"column",alignItems:"center",gap:4,zIndex:10}}>
-          {/* Cartes dealer */}
-          {dealerCards.length>0 && (
-            <div style={{display:"flex",gap:4}}>
-              {dealerCards.map((c,i)=>bjCard(c,i,false))}
-            </div>
+          {dealerCards.length>0?(
+            <>
+              <div style={{display:"flex",gap:4}}>
+                {dealerCards.map((c,i)=>bjCard(c,i,false))}
+              </div>
+              <div style={{background:"rgba(0,0,0,.7)",borderRadius:6,padding:"2px 10px",color:"#ffd700",fontSize:11,fontWeight:700,border:"1px solid rgba(255,215,0,.2)"}}>
+                Croupier — {dealerScore}
+              </div>
+            </>
+          ):(
+            <div style={{color:"rgba(255,255,255,.1)",fontSize:11,letterSpacing:2}}>🃏 BANQUE</div>
           )}
-          {dealerCards.length===0 && roomStatus==="waiting" && (
-            <div style={{color:"rgba(255,255,255,.12)",fontSize:11,letterSpacing:2}}>🃏 BANQUE</div>
-          )}
-          {/* Score dealer */}
-          {dealerCards.length>0 && (
-            <div style={{background:"rgba(0,0,0,.7)",borderRadius:6,padding:"2px 10px",color:"#ffd700",fontSize:11,fontWeight:700,border:"1px solid rgba(255,215,0,.2)"}}>
-              Croupier — {dealerScore}
-            </div>
-          )}
-          {/* Message résultat / countdown */}
-          {roomStatus==="countdown" && countdown!==null && (
-            <div style={{fontSize:48,fontWeight:900,color:countdown<=3?"#e74c3c":"#ffd700",textShadow:`0 0 30px ${countdown<=3?"rgba(231,76,60,.8)":"rgba(255,215,0,.6)"}`,animation:countdown<=3?"pulse .5s ease-in-out infinite":"none",lineHeight:1}}>{countdown}</div>
-          )}
-          {roomStatus==="finished" && myResult && (
-            <div style={{background:"rgba(0,0,0,.85)",borderRadius:10,padding:"4px 14px",color:"#ffd700",fontSize:13,fontWeight:900,textAlign:"center",textShadow:"0 0 16px rgba(255,215,0,.6)",animation:"pulse 1s ease-in-out infinite",border:"1px solid rgba(255,215,0,.3)"}}>
+          {roomStatus==="finished"&&myResult&&(
+            <div style={{background:"rgba(0,0,0,.85)",borderRadius:10,padding:"4px 14px",color:"#ffd700",fontSize:13,fontWeight:900,textShadow:"0 0 16px rgba(255,215,0,.6)",animation:"pulse 1s ease-in-out infinite",border:"1px solid rgba(255,215,0,.3)",textAlign:"center"}}>
               {myResult.map(r=>r.text).join(" · ")}
             </div>
           )}
         </div>
 
-        {/* JOUEURS EN CERCLE */}
+        {/* Joueurs en cercle */}
         {orderedPlayers.map((rp,idx)=>{
-          const isMe = rp.player_id===user.id;
-          const p = bjSeatPos(idx, total);
-          const hands = rp.hands||[[]];
-          const cards = hands[0]||[];
-          const sc = cards.length>0?handScore(cards.map(e=>e.card||e)):null;
-          const bust = sc>21;
-          const isActive = rp.status==="playing"&&roomStatus==="playing";
-          const isDone = rp.status==="done"||rp.status==="finished";
-          const result = rp.result;
-          return (
+          const isMe=rp.player_id===user.id;
+          const p=bjSeatPos(idx,total);
+          const hands=rp.hands||[[]];
+          const cards=hands[0]||[];
+          const sc=cards.length>0?handScore(cards.map(e=>e.card||e)):null;
+          const bust=sc>21;
+          const isActing=room?.action_seat===rp.seat&&roomStatus==="playing"&&rp.status==="playing";
+          const isDone=rp.status==="done"||rp.status==="finished";
+          const playPos=playOrder.findIndex(p=>p.id===rp.id)+1;
+          return(
             <div key={rp.id} style={{
               position:"absolute",left:`${p.x}%`,top:`${p.y}%`,
-              transform:"translate(-50%,-50%)",zIndex:isActive?20:5,
+              transform:"translate(-50%,-50%)",zIndex:isActing?20:5,
               display:"flex",flexDirection:"column",alignItems:"center",gap:2,
-              opacity:isDone&&!isMe?.7:1,transition:"opacity .3s",
+              opacity:isDone&&!isMe?.65:1,transition:"opacity .3s",
             }}>
-              {/* Cartes du joueur */}
-              {cards.length>0 && (
+              {cards.length>0&&(
                 <div style={{display:"flex",gap:3,marginBottom:2}}>
                   {cards.map((e,i)=>bjCard(e,i,!isMe))}
                 </div>
               )}
-              {/* Badge joueur */}
               <div style={{
-                background:isActive?"rgba(255,215,0,.15)":"rgba(0,0,0,.7)",
-                border:`2px solid ${isActive?"#ffd700":isMe?"#3a3a2e":"#1a1a1a"}`,
-                borderRadius:10,padding:"3px 8px",textAlign:"center",minWidth:58,
-                boxShadow:isActive?"0 0 16px rgba(255,215,0,.5)":"none",
-                transition:"all .2s",
+                background:isActing?"rgba(255,215,0,.15)":"rgba(0,0,0,.75)",
+                border:`2px solid ${isActing?"#ffd700":isMe?"#3a3a2e":"#1a1a1a"}`,
+                borderRadius:10,padding:"3px 8px",textAlign:"center",minWidth:60,
+                boxShadow:isActing?"0 0 18px rgba(255,215,0,.6)":"none",
+                transition:"all .2s",position:"relative",
               }}>
+                {playPos>0&&roomStatus==="playing"&&(
+                  <div style={{position:"absolute",top:-8,left:-6,background:isActing?"#ffd700":"#2a2a3e",color:isActing?"#111":"#888",fontSize:8,fontWeight:900,borderRadius:4,padding:"1px 4px"}}>#{playPos}</div>
+                )}
                 <div style={{color:isMe?"#ffd700":"#ccc",fontSize:9,fontWeight:700,whiteSpace:"nowrap"}}>
-                  {isActive?"▶ ":""}{rp.players?.username||"?"}{isMe?" (moi)":""}
+                  {isActing?"▶ ":""}{rp.players?.username||"?"}{isMe?" (moi)":""}
                 </div>
-                {sc!==null && <div style={{color:bust?"#e74c3c":"#aaa",fontSize:9,fontWeight:700}}>{sc}{bust?" 💥":""}</div>}
-                {rp.bet>0 && <div style={{color:"rgba(255,215,0,.7)",fontSize:8}}>Mise: {rp.bet}</div>}
-                {isDone && result && <div style={{color:"#4caf50",fontSize:8,fontWeight:700}}>{result[0]?.text||"✓"}</div>}
-                {rp.status==="waiting"&&roomStatus==="waiting"&&<div style={{color:"#555",fontSize:8}}>En attente…</div>}
+                {sc!==null&&<div style={{color:bust?"#e74c3c":"#aaa",fontSize:9,fontWeight:700}}>{sc}{bust?" 💥":""}</div>}
+                {rp.bet>0&&<div style={{color:"rgba(255,215,0,.7)",fontSize:8}}>Mise:{rp.bet}</div>}
+                {isDone&&rp.result&&<div style={{color:"#4caf50",fontSize:8,fontWeight:700}}>{rp.result[0]?.text||"✓"}</div>}
+                {rp.status==="waiting"&&roomStatus==="waiting"&&<div style={{color:"#555",fontSize:8}}>—</div>}
                 {rp.status==="ready"&&roomStatus==="waiting"&&<div style={{color:"#4caf50",fontSize:8}}>✓ Prêt</div>}
               </div>
             </div>
@@ -1437,46 +1366,74 @@ function RoomScreen({ user, roomId, isHost: initIsHost, onLeave, onUpdateTokens 
 
       {/* Contrôles */}
       <div style={{padding:"8px 12px 12px",flexShrink:0}}>
-        {(roomStatus==="waiting"||roomStatus==="countdown") && (
+
+        {/* ATTENTE — miser */}
+        {roomStatus==="waiting"&&(
           <div>
-            {roomStatus==="waiting" && myRp?.status==="waiting" && (
-              <div style={{display:"flex",gap:6,marginBottom:8}}>
+            <div style={{marginBottom:8}}>
+              {/* Raccourcis rapides */}
+              <div style={{display:"flex",gap:5,marginBottom:6}}>
+                {[20,50,100].map(v=>(
+                  <button key={v} onClick={()=>setBetInput(String(Math.min(v,user.tokens)))} style={{
+                    flex:1,padding:"7px 0",borderRadius:8,fontSize:12,fontWeight:700,border:"none",cursor:"pointer",
+                    background:betInput===String(v)?"#ffd700":"#141424",
+                    color:betInput===String(v)?"#111":"#666",
+                  }}>{v}</button>
+                ))}
+                <button onClick={()=>setBetInput(String(Math.min(parseInt(betInput||"0")*2||20,user.tokens)))} style={{flex:1,padding:"7px 0",borderRadius:8,fontSize:12,fontWeight:700,border:"1px solid #222",background:"#0e0e1e",color:"#888",cursor:"pointer"}}>×2</button>
+                <button onClick={()=>setBetInput(String(Math.max(1,Math.floor((parseInt(betInput||"0")||20)/2))))} style={{flex:1,padding:"7px 0",borderRadius:8,fontSize:12,fontWeight:700,border:"1px solid #222",background:"#0e0e1e",color:"#888",cursor:"pointer"}}>÷2</button>
+              </div>
+              {/* Input libre */}
+              <div style={{display:"flex",gap:6}}>
                 <div style={{position:"relative",flex:1}}>
                   <span style={{position:"absolute",left:10,top:"50%",transform:"translateY(-50%)",color:"#ffd700",fontSize:13}}>🪙</span>
                   <input type="number" min="1" value={betInput} onChange={e=>setBetInput(e.target.value)}
                     style={{width:"100%",background:"#0e0e1e",border:"1.5px solid #2a2a3e",borderRadius:10,padding:"9px 10px 9px 28px",color:"#ffd700",fontSize:15,fontWeight:800,outline:"none",boxSizing:"border-box"}}/>
                 </div>
-                <button onClick={placeBet} style={{padding:"9px 16px",background:"linear-gradient(135deg,#ffd700,#ffaa00)",border:"none",borderRadius:10,fontSize:14,fontWeight:800,color:"#111",cursor:"pointer"}}>Miser ✓</button>
+                {myRp?.status!=="ready"
+                  ?<button onClick={placeBet} style={{padding:"9px 16px",background:"linear-gradient(135deg,#ffd700,#ffaa00)",border:"none",borderRadius:10,fontSize:14,fontWeight:800,color:"#111",cursor:"pointer"}}>Miser ✓</button>
+                  :<div style={{padding:"9px 14px",color:"#4caf50",fontSize:13,fontWeight:700,display:"flex",alignItems:"center"}}>✓ Prêt</div>
+                }
               </div>
-            )}
-            {roomStatus==="waiting" && myRp?.status==="ready" && (
-              <div style={{color:"#4caf50",textAlign:"center",fontSize:13,fontWeight:600,marginBottom:8}}>✓ Mise de {myRp.bet} 🪙 placée</div>
-            )}
-            {roomStatus==="countdown" && countdown!==null && (
-              <div style={{color:"#555",textAlign:"center",fontSize:12,marginBottom:6}}>Distribution dans…</div>
-            )}
-            {isHost && roomStatus==="waiting" && (
-              <button onClick={startCountdown} style={{width:"100%",padding:13,background:"linear-gradient(135deg,#27ae60,#1e8449)",border:"none",borderRadius:12,fontSize:15,fontWeight:900,color:"#fff",cursor:"pointer",boxShadow:"0 4px 16px rgba(39,174,96,.4)"}}>
-                ⏱ Démarrer ({roomPlayers.filter(p=>p.status==="ready").length}/{roomPlayers.length} ont misé)
+            </div>
+            {isHost&&(
+              <button onClick={startGame} style={{width:"100%",padding:13,background:"linear-gradient(135deg,#27ae60,#1e8449)",border:"none",borderRadius:12,fontSize:15,fontWeight:900,color:"#fff",cursor:"pointer",boxShadow:"0 4px 16px rgba(39,174,96,.4)"}}>
+                ▶ Distribuer ({roomPlayers.filter(p=>p.status==="ready").length}/{roomPlayers.length} prêts)
               </button>
             )}
-            {!isHost && roomStatus==="waiting" && (
-              <div style={{color:"#444",textAlign:"center",fontSize:12,padding:6}}>En attente du créateur…</div>
+            {!isHost&&<div style={{color:"#444",textAlign:"center",fontSize:12,padding:6}}>En attente du créateur…</div>}
+          </div>
+        )}
+
+        {/* JEU */}
+        {roomStatus==="playing"&&(
+          <div>
+            {isMyTurn&&(
+              <div style={{display:"flex",gap:8}}>
+                <button onClick={hit} style={{flex:1,padding:13,borderRadius:12,fontSize:15,fontWeight:800,border:"none",background:"linear-gradient(135deg,#27ae60,#1e8449)",color:"#fff",cursor:"pointer",boxShadow:"0 4px 14px rgba(39,174,96,.35)"}}>HIT</button>
+                <button onClick={stand} style={{flex:1,padding:13,borderRadius:12,fontSize:15,fontWeight:800,border:"none",background:"linear-gradient(135deg,#e74c3c,#c0392b)",color:"#fff",cursor:"pointer",boxShadow:"0 4px 14px rgba(231,76,60,.35)"}}>STAND</button>
+              </div>
             )}
+            {!isMyTurn&&!iAmDone&&(
+              <div style={{textAlign:"center",padding:8}}>
+                {room?.action_seat>=0?(
+                  <div>
+                    <div style={{color:"#555",fontSize:11,marginBottom:2}}>Tour de :</div>
+                    <div style={{color:"#ffd700",fontSize:14,fontWeight:700}}>
+                      {roomPlayers.find(p=>p.seat===room.action_seat)?.players?.username||"..."}
+                    </div>
+                  </div>
+                ):<div style={{color:"#555",fontSize:12}}>Le croupier joue…</div>}
+              </div>
+            )}
+            {iAmDone&&<div style={{color:"#4caf50",textAlign:"center",fontSize:13,fontWeight:600,padding:8}}>✓ En attente des autres…</div>}
           </div>
         )}
-        {roomStatus==="playing" && iAmPlaying && (
+
+        {/* FIN */}
+        {roomStatus==="finished"&&(
           <div style={{display:"flex",gap:8}}>
-            <button onClick={hit} style={{flex:1,padding:13,borderRadius:12,fontSize:15,fontWeight:800,border:"none",background:"linear-gradient(135deg,#27ae60,#1e8449)",color:"#fff",cursor:"pointer",boxShadow:"0 4px 14px rgba(39,174,96,.35)"}}>HIT</button>
-            <button onClick={stand} style={{flex:1,padding:13,borderRadius:12,fontSize:15,fontWeight:800,border:"none",background:"linear-gradient(135deg,#e74c3c,#c0392b)",color:"#fff",cursor:"pointer",boxShadow:"0 4px 14px rgba(231,76,60,.35)"}}>STAND</button>
-          </div>
-        )}
-        {roomStatus==="playing" && iAmDone && (
-          <div style={{color:"#4caf50",textAlign:"center",fontSize:13,fontWeight:600,padding:8}}>✓ En attente des autres joueurs…</div>
-        )}
-        {roomStatus==="finished" && (
-          <div style={{display:"flex",gap:8}}>
-            {isHost && <button onClick={newGame} style={{flex:1,padding:13,borderRadius:12,fontSize:14,fontWeight:800,border:"none",background:"linear-gradient(135deg,#ffd700,#ffaa00)",color:"#111",cursor:"pointer"}}>↺ Rejouer</button>}
+            {isHost&&<button onClick={newGame} style={{flex:1,padding:13,borderRadius:12,fontSize:14,fontWeight:800,border:"none",background:"linear-gradient(135deg,#ffd700,#ffaa00)",color:"#111",cursor:"pointer"}}>↺ Rejouer</button>}
             <button onClick={leaveRoom} style={{flex:1,padding:13,borderRadius:12,fontSize:14,fontWeight:800,border:"1px solid #333",background:"transparent",color:"#888",cursor:"pointer"}}>Quitter</button>
           </div>
         )}
