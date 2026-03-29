@@ -1247,7 +1247,7 @@ function RoomScreen({ user, roomId, isHost: initIsHost, onLeave, onUpdateTokens 
     await sleep(600);
     const dealerCards=dealer.map(c=>c.card||c);
     while(handScore(dealerCards)<17){
-      const c=riggedPop(deck,dealerCards,0);
+      const c=deck.pop(); // jeu aléatoire en multijoueur
       dealerCards.push(c);
       dealer.push({card:c,faceUp:true,visible:true});
       await supabase.from("rooms").update({dealer_cards:dealer,deck}).eq("id",roomId);
