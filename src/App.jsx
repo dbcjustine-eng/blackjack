@@ -294,13 +294,17 @@ function GameScreen({ user, onUpdateTokens, onLogout }) {
     let finalDealer = [...dealerCards];
     let tempDeck = [...currentDeck];
 
+    // Si le croupier a un blackjack naturel (As + figure dès le départ),
+    // on le respecte TOUJOURS — même en mode promo 100%
+    const dealerHasNaturalBJ = finalDealer.length === 2 && handScore(finalDealer) === 21;
+
     // Score du joueur le plus fort non-busté (pour guider la triche)
     const bestPlayerScore = handCards
       .map(hc => handScore(hc))
       .filter(s => s <= 21)
       .reduce((a, b) => Math.max(a, b), 0);
 
-    if (!allBust) {
+    if (!allBust && !dealerHasNaturalBJ) {
       while (handScore(finalDealer) < 17) {
         const c = riggedPop(tempDeck, finalDealer, bestPlayerScore, currentWinRate());
         finalDealer.push(c);
