@@ -142,28 +142,60 @@ export function PokerSoloBots({ user, botCount, onBack, onUpdateTokens }) {
     else{const b=newBots.find(x=>x.seat===sbSeat);if(b){b.betThisRound=SMALL_BLIND;b.totalBet=SMALL_BLIND;b.tokens-=SMALL_BLIND;}}
     if(bbSeat===0){playerTokens-=BIG_BLIND;pBet=BIG_BLIND;}
     else{const b=newBots.find(x=>x.seat===bbSeat);if(b){b.betThisRound=BIG_BLIND;b.totalBet=BIG_BLIND;b.tokens-=BIG_BLIND;}}
-    return {deck,community:[],pot,currentBet:BIG_BLIND,phase:"preflop",actionSeat,dealerSeat:0,sbSeat,bbSeat,playerCards,playerBet:pBet,playerTotalBet:pBet,playerStatus:"active",bots:newBots,playerTokens,msg:"",winners:[]};
+    return {deck,community:[],pot,currentBet:BIG_BLIND,phase:"preflop",actionSeat,dealerSeat:0,sbSeat,bbSeat,playerCards,playerBet:pBet,playerTotalBet:pBet,playerStatus:"active",bots:newBots,playerTokens,msg:"",winners:[],lastRaiseSeat:null};
   }
 
   const [game,setGame]=useState(()=>buildGame(user.tokens));
   const [raiseInput,setRaiseInput]=useState("");
 
   const advance=useCallback((g,isRaise=false)=>{
-    const activeBots=g.bots.filter(b=>b.status==="active");
-    const stillIn=[...(g.playerStatus!=="folded"?["p"]:[]),...activeBots.map(b=>b.id)];
+    // Joueurs encore en jeu (pas foldés)
+    const stillIn=[
+      ...(g.playerStatus!=="folded"?[{seat:0,bet:g.playerBet,status:g.playerStatus}]:[]),
+      ...g.bots.filter(b=>b.status!=="folded").map(b=>({seat:b.seat,bet:b.betThisRound,status:b.status}))
+    ];
     if(stillIn.length<=1) return doShowdown(g);
-    const allEq=activeBots.every(b=>b.betThisRound===g.currentBet||b.status==="allin")&&(g.playerStatus==="folded"||g.playerBet===g.currentBet||g.playerStatus==="allin");
-    if(allEq&&!isRaise) return doNextPhase(g);
-    const allSeats=[0,...g.bots.map(b=>b.seat)];
-    const activeSeats=allSeats.filter(s=>{if(s===0)return g.playerStatus==="active";const b=g.bots.find(x=>x.seat===s);return b&&b.status==="active";});
+
+    // Si raise : mémoriser qui vient de raiser → la prochaine fois qu'on revient à lui, le tour s'arrête
+    if(isRaise) g.lastRaiseSeat=g.actionSeat;
+
+    // Joueurs actifs (peuvent encore agir)
+    const activeSeats=[
+      ...(g.playerStatus==="active"?[0]:[]),
+      ...g.bots.filter(b=>b.status==="active").map(b=>b.seat)
+    ].sort((a,b)=>a-b);
+
     if(activeSeats.length===0) return doNextPhase(g);
+
+    // Passer au siège suivant
     const ci=activeSeats.indexOf(g.actionSeat);
-    g.actionSeat=activeSeats[(ci+1)%activeSeats.length];
+    const nextSeat=activeSeats[(ci+1)%activeSeats.length];
+
+    // Vérifier si le tour est complet :
+    // Le tour est complet si le prochain siège à jouer est celui qui a raisé en dernier
+    // ET tous les actifs ont mis la même chose
+    const allEq=activeSeats.every(s=>{
+      if(s===0) return g.playerBet===g.currentBet||g.playerStatus==="allin";
+      const b=g.bots.find(x=>x.seat===s);
+      return b&&(b.betThisRound===g.currentBet||b.status==="allin");
+    });
+
+    // Si tout le monde a égalisé et que le prochain c'est le raiser → phase suivante
+    if(allEq && g.lastRaiseSeat!=null && nextSeat===g.lastRaiseSeat) {
+      return doNextPhase(g);
+    }
+    // Si tout le monde a égalisé et pas de raise → phase suivante
+    if(allEq && g.lastRaiseSeat==null) {
+      return doNextPhase(g);
+    }
+
+    g.actionSeat=nextSeat;
     return g;
   },[]);
 
   function doNextPhase(g) {
     g.playerBet=0; g.bots=g.bots.map(b=>({...b,betThisRound:0})); g.currentBet=0;
+    g.lastRaiseSeat=null; // réinitialiser pour la nouvelle phase
     const as=[...(g.playerStatus!=="folded"?[0]:[]),...g.bots.filter(b=>b.status!=="folded").map(b=>b.seat)].sort((a,b)=>a-b);
     g.actionSeat=as[0]??0;
     if(g.phase==="preflop"){g.community=[g.deck.pop(),g.deck.pop(),g.deck.pop()];g.phase="flop";}
