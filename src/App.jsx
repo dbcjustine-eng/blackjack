@@ -1,6 +1,17 @@
 import { useState, useRef, useEffect } from "react";
 import { supabase } from "./supabase.js";
 
+// ── TRANSACTION LOGGER ────────────────────────────────────────────────────────
+async function logTransaction(playerId, type, amount, description, balanceAfter) {
+  await supabase.from("transactions").insert({
+    player_id: playerId,
+    type,
+    amount,
+    description,
+    balance_after: balanceAfter,
+  });
+}
+
 // ── CARD ENGINE ───────────────────────────────────────────────────────────────
 const SUITS = ["♠","♥","♦","♣"];
 const RANKS = ["A","2","3","4","5","6","7","8","9","10","J","Q","K"];
@@ -19,18 +30,18 @@ function freshDeck() {
 // Pioche truquée : le croupier choisit la carte qui l'avantage le plus
 // parmi N candidats tirés du dessus du deck (invisible pour le joueur).
 // WIN_RATE = probabilité cible que le joueur gagne.
-const WIN_RATE = 0.40; // 40%
+const WIN_RATE = 0.45; // 45%
 const CHEAT_POOL = 6;  // nb de candidats scannés en secret
 
-function riggedPop(deck, dealerCurrent, playerScore) {
+function riggedPop(deck, dealerCurrent, playerScore, winRate = WIN_RATE) {
   if (deck.length === 0) return null;
   // On prend un pool de candidats (sans les retirer du deck encore)
   const pool = deck.slice(-CHEAT_POOL);
   const ds = handScore(dealerCurrent);
 
-  // Si le RNG dit que le croupier doit gagner (65% du temps), on choisit
+  // Si le RNG dit que le croupier doit gagner, on choisit
   // la carte qui rapproche le croupier de battre le joueur sans buster.
-  const dealerShouldWin = Math.random() > WIN_RATE;
+  const dealerShouldWin = Math.random() > winRate;
 
   let chosen = null;
   if (dealerShouldWin) {
@@ -176,14 +187,30 @@ function AnimatedHand({ entries, label, score, active, bust, done }) {
 function GameScreen({ user, onUpdateTokens, onLogout }) {
   const [deck,         setDeck]         = useState([]);
   const [dealerEntries,setDealerEntries]= useState([]);
-  // Split support: array of 1 or 2 hands, each is array of entries
-  const [hands,        setHands]        = useState([]); // [{entries:[]}]
+  const [hands,        setHands]        = useState([]);
   const [activeHand,   setActiveHand]   = useState(0);
   const [bet,          setBet]          = useState(10);
   const [betInput,     setBetInput]     = useState("10");
   const [phase,        setPhase]        = useState("bet");
   const [msg,          setMsg]          = useState("");
+  const [showHistory,  setShowHistory]  = useState(false);
+  const [handsPlayed,  setHandsPlayed]  = useState(user.hands_played ?? 0);
   const busy = useRef(false);
+
+  // Les 3 premières mains = 100% de chance de gagner
+  const PROMO_HANDS = 3;
+  function currentWinRate() {
+    return handsPlayed < PROMO_HANDS ? 1.0 : WIN_RATE;
+  }
+
+  if (showHistory) return (
+    <HistoryScreen
+      playerId={user.id}
+      playerName={user.username}
+      onBack={()=>setShowHistory(false)}
+      isAdmin={false}
+    />
+  );
 
   // ── helpers ────────────────────────────────────────────────────────────────
   const dealerCards = dealerEntries.map(e=>e.card);
@@ -275,7 +302,7 @@ function GameScreen({ user, onUpdateTokens, onLogout }) {
 
     if (!allBust) {
       while (handScore(finalDealer) < 17) {
-        const c = riggedPop(tempDeck, finalDealer, bestPlayerScore);
+        const c = riggedPop(tempDeck, finalDealer, bestPlayerScore, currentWinRate());
         finalDealer.push(c);
         setDeck([...tempDeck]);
         await animateToDealer(c, true);
@@ -292,14 +319,21 @@ function GameScreen({ user, onUpdateTokens, onLogout }) {
       return result;
     });
 
-    if (totalGain > 0) onUpdateTokens(totalGain);
-
     const msgText = currentHands.length > 1
       ? results.map((r,i)=>`Main ${i+1}: ${r}`).join("  ·  ")
       : results[0];
 
+    // net = ce que le joueur reçoit - la mise déjà débitée
+    const netDelta = totalGain - 0; // totalGain inclut déjà le remboursement de mise
+    if (totalGain > 0) onUpdateTokens(totalGain, msgText);
+
     setMsg(msgText);
     setPhase("done");
+
+    // Incrémenter le compteur de mains jouées
+    const newHandsPlayed = handsPlayed + 1;
+    setHandsPlayed(newHandsPlayed);
+    await supabase.from("players").update({ hands_played: newHandsPlayed }).eq("id", user.id);
   }
 
   // ── deal ───────────────────────────────────────────────────────────────────
@@ -458,7 +492,10 @@ function GameScreen({ user, onUpdateTokens, onLogout }) {
           <div style={{color:"#555",fontSize:10,letterSpacing:1.5,textTransform:"uppercase"}}>Solde</div>
           <div style={{color:"#ffd700",fontSize:22,fontWeight:800,lineHeight:1.1}}>🪙 {user.tokens.toLocaleString()}</div>
         </div>
-        <button onClick={onLogout} style={{background:"transparent",border:"1px solid #2a2a3e",color:"#555",borderRadius:8,padding:"6px 12px",fontSize:12,cursor:"pointer"}}>Déco</button>
+        <div style={{display:"flex",gap:6}}>
+          <button onClick={()=>setShowHistory(true)} style={{background:"transparent",border:"1px solid #2a2a3e",color:"#888",borderRadius:8,padding:"6px 10px",fontSize:13,cursor:"pointer"}}>📋</button>
+          <button onClick={onLogout} style={{background:"transparent",border:"1px solid #2a2a3e",color:"#555",borderRadius:8,padding:"6px 12px",fontSize:12,cursor:"pointer"}}>Déco</button>
+        </div>
       </div>
 
       {/* Table */}
@@ -643,13 +680,23 @@ function GameScreen({ user, onUpdateTokens, onLogout }) {
 
 // ── ADMIN PANEL ───────────────────────────────────────────────────────────────
 function AdminPanel({ currentUser, onLogout }) {
-  const [players,  setPlayers]  = useState([]);
-  const [selected, setSelected] = useState(null);
-  const [amount,   setAmount]   = useState("");
-  const [msg,      setMsg]      = useState("");
-  const [newUser,  setNewUser]  = useState({ username:"", password:"", tokens:100 });
-  const [tab,      setTab]      = useState("users");
-  const [loading,  setLoading]  = useState(false);
+  const [players,     setPlayers]     = useState([]);
+  const [selected,    setSelected]    = useState(null);
+  const [amount,      setAmount]      = useState("");
+  const [msg,         setMsg]         = useState("");
+  const [newUser,     setNewUser]     = useState({ username:"", password:"", tokens:100 });
+  const [tab,         setTab]         = useState("users");
+  const [loading,     setLoading]     = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+
+  if (showHistory) return (
+    <HistoryScreen
+      playerId={null}
+      playerName="tous"
+      onBack={()=>setShowHistory(false)}
+      isAdmin={true}
+    />
+  );
 
   // Charge la liste des joueurs depuis Supabase
   async function loadPlayers() {
@@ -667,6 +714,8 @@ function AdminPanel({ currentUser, onLogout }) {
     const newTokens = Math.max(0, player.tokens + delta);
     await supabase.from("players").update({ tokens: newTokens }).eq("id", player.id);
     setPlayers(prev => prev.map(p => p.id===player.id ? {...p, tokens:newTokens} : p));
+    const desc = delta > 0 ? `Crédit admin: +${delta}` : `Retrait admin: ${delta}`;
+    await logTransaction(player.id, delta > 0 ? "credit" : "debit", delta, desc, newTokens);
     setMsg(`${delta>0?"+":""}${delta} jetons → @${player.username}`);
     setTimeout(()=>setMsg(""), 2500);
   }
@@ -716,6 +765,11 @@ function AdminPanel({ currentUser, onLogout }) {
             transition:"all .15s",
           }}>{l}</button>
         ))}
+        <button onClick={()=>setShowHistory(true)} style={{
+          flex:1, padding:"9px 0", borderRadius:10, fontSize:13, fontWeight:700, cursor:"pointer", border:"none",
+          background:"#141424", color:"#888",
+          transition:"all .15s",
+        }}>📋 Historique</button>
       </div>
 
       {msg && (
@@ -783,6 +837,121 @@ function AdminPanel({ currentUser, onLogout }) {
   );
 }
 
+// ── HISTORY SCREEN ────────────────────────────────────────────────────────────
+function HistoryScreen({ playerId, playerName, onBack, isAdmin }) {
+  const [transactions, setTransactions] = useState([]);
+  const [players,      setPlayers]      = useState([]);
+  const [filterPlayer, setFilterPlayer] = useState(playerId); // admin peut filtrer
+  const [loading,      setLoading]      = useState(true);
+
+  useEffect(() => {
+    if (isAdmin) loadAllPlayers();
+    loadTransactions(filterPlayer);
+  }, []);
+
+  useEffect(() => {
+    loadTransactions(filterPlayer);
+  }, [filterPlayer]);
+
+  async function loadAllPlayers() {
+    const { data } = await supabase.from("players").select("id,username").eq("is_admin",false).order("username");
+    if (data) setPlayers(data);
+  }
+
+  async function loadTransactions(pid) {
+    setLoading(true);
+    let query = supabase
+      .from("transactions")
+      .select("*, players(username)")
+      .order("created_at", { ascending: false })
+      .limit(50);
+    if (pid) query = query.eq("player_id", pid);
+    const { data } = await query;
+    if (data) setTransactions(data);
+    setLoading(false);
+  }
+
+  function typeIcon(type) {
+    if (type==="credit") return "💰";
+    if (type==="debit")  return "🔻";
+    return "🃏";
+  }
+  function typeColor(amount) {
+    if (amount > 0) return "#4caf50";
+    if (amount < 0) return "#e74c3c";
+    return "#888";
+  }
+  function formatDate(d) {
+    const dt = new Date(d);
+    return dt.toLocaleDateString("fr-FR",{day:"2-digit",month:"2-digit"}) + " " +
+           dt.toLocaleTimeString("fr-FR",{hour:"2-digit",minute:"2-digit"});
+  }
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",height:"100%",padding:"0 16px 16px"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"12px 0 10px"}}>
+        <div>
+          <div style={{color:"#ffd700",fontSize:10,letterSpacing:2,textTransform:"uppercase"}}>
+            {isAdmin ? "Admin" : "Joueur"}
+          </div>
+          <div style={{color:"#fff",fontSize:20,fontWeight:900}}>Historique</div>
+        </div>
+        <button onClick={onBack} style={{background:"transparent",border:"1px solid #2a2a3e",color:"#888",borderRadius:8,padding:"6px 12px",fontSize:12,cursor:"pointer"}}>← Retour</button>
+      </div>
+
+      {/* Filtre joueur (admin seulement) */}
+      {isAdmin && (
+        <div style={{marginBottom:12}}>
+          <select
+            value={filterPlayer || ""}
+            onChange={e=>setFilterPlayer(e.target.value||null)}
+            style={{width:"100%",background:"#10101e",border:"1px solid #2a2a3e",borderRadius:10,padding:"9px 12px",color:"#fff",fontSize:14,outline:"none"}}
+          >
+            <option value="">Tous les joueurs</option>
+            {players.map(p=>(
+              <option key={p.id} value={p.id}>@{p.username}</option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      {/* Liste */}
+      <div style={{flex:1,overflowY:"auto"}}>
+        {loading && <div style={{color:"#555",textAlign:"center",marginTop:40}}>Chargement…</div>}
+        {!loading && transactions.length===0 && (
+          <div style={{color:"#444",textAlign:"center",marginTop:40,fontSize:14}}>Aucune transaction</div>
+        )}
+        {transactions.map(tx=>(
+          <div key={tx.id} style={{
+            background:"#10101e", borderRadius:12, padding:"11px 14px",
+            marginBottom:8, border:"1px solid #1a1a2e",
+            display:"flex", justifyContent:"space-between", alignItems:"center",
+          }}>
+            <div style={{flex:1}}>
+              <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:3}}>
+                <span style={{fontSize:14}}>{typeIcon(tx.type)}</span>
+                {isAdmin && tx.players && (
+                  <span style={{color:"#666",fontSize:11,fontWeight:600}}>@{tx.players.username}</span>
+                )}
+              </div>
+              <div style={{color:"#ccc",fontSize:12,lineHeight:1.4}}>{tx.description}</div>
+              <div style={{color:"#444",fontSize:10,marginTop:3}}>{formatDate(tx.created_at)}</div>
+            </div>
+            <div style={{textAlign:"right",flexShrink:0,marginLeft:10}}>
+              <div style={{color:typeColor(tx.amount),fontWeight:800,fontSize:15}}>
+                {tx.amount>0?"+":""}{tx.amount} 🪙
+              </div>
+              <div style={{color:"#555",fontSize:11,marginTop:2}}>
+                Solde: {tx.balance_after}
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ── LOGIN ─────────────────────────────────────────────────────────────────────
 function LoginScreen({ onLogin }) {
   const [username, setUsername] = useState("");
@@ -844,14 +1013,14 @@ function LoginScreen({ onLogin }) {
 export default function App() {
   const [currentUser, setCurrentUser] = useState(null); // objet player complet depuis DB
 
-  async function updateTokens(delta) {
+  async function updateTokens(delta, description = "") {
     if (!currentUser) return;
     const newTokens = Math.max(0, currentUser.tokens + delta);
     setCurrentUser(prev => ({...prev, tokens: newTokens}));
-    await supabase
-      .from("players")
-      .update({ tokens: newTokens })
-      .eq("id", currentUser.id);
+    await supabase.from("players").update({ tokens: newTokens }).eq("id", currentUser.id);
+    if (description) {
+      await logTransaction(currentUser.id, "game", delta, description, newTokens);
+    }
   }
 
   function handleLogin(playerData) {
