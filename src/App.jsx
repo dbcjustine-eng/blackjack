@@ -31,7 +31,7 @@ function freshDeck() {
 // parmi N candidats tirés du dessus du deck (invisible pour le joueur).
 // WIN_RATE = probabilité cible que le joueur gagne.
 const WIN_RATE = 0.45; // 45%
-const CHEAT_POOL = 6;  // nb de candidats scannés en secret
+const CHEAT_POOL = 3;  // nb de candidats scannés en secret (moins = plus d'égalités)
 
 function riggedPop(deck, dealerCurrent, playerScore, winRate = WIN_RATE) {
   if (deck.length === 0) return null;
