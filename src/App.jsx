@@ -1064,7 +1064,11 @@ function RoomScreen({ user, roomId, isHost: initIsHost, onLeave, onUpdateTokens 
         if (p.eventType==="DELETE") { setRoomPlayers(prev=>prev.filter(x=>x.id!==p.old?.id)); return; }
         setRoomPlayers(prev => {
           const exists = prev.find(x=>x.id===p.new.id);
-          const merged = {...p.new, players: exists?.players ?? p.new.players};
+          // Recalculer tokens affichés si la mise a changé
+          const prevTokens = exists?.players?.tokens;
+          const players = exists?.players ? {...exists.players} : (p.new.players ?? {});
+          // Mettre à jour le solde affiché si on a la valeur en DB
+          const merged = {...p.new, players};
           if (exists) return prev.map(x=>x.id===p.new.id ? merged : x);
           loadRoomPlayers(); // nouveau joueur → recharger pour avoir le username
           return prev;
@@ -1072,7 +1076,20 @@ function RoomScreen({ user, roomId, isHost: initIsHost, onLeave, onUpdateTokens 
         if (p.new.player_id===user.id) setMyRp(p.new);
       })
       .subscribe();
-    return () => supabase.removeChannel(sub);
+
+    // Rafraîchir les tokens des joueurs en temps réel
+    const playerIds_ref = { ids: [] };
+    const tokenSub = supabase.channel("tokens-"+roomId)
+      .on("postgres_changes",{event:"UPDATE",schema:"public",table:"players"}, p => {
+        setRoomPlayers(prev => prev.map(rp =>
+          rp.player_id===p.new.id
+            ? {...rp, players:{...rp.players, tokens:p.new.tokens}}
+            : rp
+        ));
+      })
+      .subscribe();
+
+    return () => { supabase.removeChannel(sub); supabase.removeChannel(tokenSub); };
   }, [roomId]);
 
   async function loadRoom() {
@@ -1090,37 +1107,57 @@ function RoomScreen({ user, roomId, isHost: initIsHost, onLeave, onUpdateTokens 
     if (b<1||b>user.tokens||!myRp) return;
     await supabase.from("room_players").update({bet:b,status:"ready"}).eq("id",myRp.id);
     onUpdateTokens(-b,"");
+    // Vérifier si tout le monde a misé → lancer auto
+    const { data: allRp } = await supabase.from("room_players").select("status").eq("room_id",roomId);
+    const allReady = allRp && allRp.length >= 2 && allRp.every(p=>p.status==="ready");
+    if (allReady) await startGame(allRp);
   }
 
-  // ── Lancer la partie (hôte seulement) ────────────────────────────────────
-  async function startGame() {
-    if (!isHost||busy.current) return;
+  // ── Lancer la partie (auto dès que tout le monde est prêt) ──────────────
+  async function startGame(cachedPlayers) {
+    if (busy.current) return;
     busy.current=true;
     const { data: freshPlayers } = await supabase.from("room_players")
       .select("*, players(username,tokens)").eq("room_id",roomId).order("seat");
-    const active = (freshPlayers||[]).filter(p=>p.status==="ready"||p.status==="waiting");
+    // Vérifier statut room (pas déjà lancée)
+    const { data: roomCheck } = await supabase.from("rooms").select("status").eq("id",roomId).single();
+    if (roomCheck?.status !== "waiting") { busy.current=false; return; }
+    const active = (freshPlayers||[]).filter(p=>p.status==="ready");
     if (active.length===0) { busy.current=false; return; }
 
     const deck = freshDeck();
     const d1=deck.pop(), dHidden=deck.pop();
     const dealerCards=[{...d1,faceUp:true},{...dHidden,faceUp:false}];
 
-    // Distribuer + assigner siège de jeu (seat order)
+    // Distribuer + détecter blackjack naturel
+    const distributed = [];
     for (const rp of active) {
       const c1=deck.pop(), c2=deck.pop();
+      const isNaturalBJ = handScore([c1,c2])===21;
+      // Si blackjack naturel → statut "done" directement (sauf si dealer BJ aussi, géré au settlement)
+      const status = isNaturalBJ ? "done" : "playing";
       await supabase.from("room_players").update({
         hands:[[{card:c1,faceUp:true,visible:true},{card:c2,faceUp:true,visible:true}]],
-        active_hand:0, status:"playing",
+        active_hand:0, status,
       }).eq("id",rp.id);
+      distributed.push({...rp, bjStatus: status});
     }
 
-    // action_seat = seat du premier joueur (siège 0 ou le plus petit)
-    const firstSeat = Math.min(...active.map(p=>p.seat));
+    // Premier joueur qui doit encore jouer
+    const stillPlaying = distributed.filter(p=>p.bjStatus==="playing").sort((a,b)=>a.seat-b.seat);
+    const firstSeat = stillPlaying.length>0 ? stillPlaying[0].seat : -1;
+
     await supabase.from("rooms").update({
-      status:"playing", dealer_cards:dealerCards, deck, action_seat:firstSeat,
+      status:"playing", dealer_cards:dealerCards, deck,
+      action_seat: firstSeat, // -1 si tout le monde a BJ → dealer joue direct
     }).eq("id",roomId);
 
     await loadRoomPlayers();
+    // Si tout le monde a BJ, dealer joue immédiatement (après un court délai)
+    if (firstSeat===-1) {
+      await sleep(800);
+      await dealerPlay();
+    }
     busy.current=false;
   }
 
@@ -1201,11 +1238,17 @@ function RoomScreen({ user, roomId, isHost: initIsHost, onLeave, onUpdateTokens 
     const { data: finalRp } = await supabase.from("room_players").select("*, players(username)").eq("room_id",roomId);
     for (const rp of finalRp||[]) {
       if(rp.status==="waiting") continue;
+      const dealerBJ = dealerCards.length===2 && ds===21;
       const results=rp.hands.map(hand=>{
         const cards=hand.map(e=>e.card||e);
         const ps=handScore(cards);
-        const isBJ=cards.length===2&&ps===21&&rp.hands.length===1;
-        if(isBJ) return {text:"🎰 Blackjack!",gain:rp.bet*2.5};
+        const playerBJ=cards.length===2&&ps===21&&rp.hands.length===1;
+        // BJ joueur vs BJ dealer → égalité
+        if(playerBJ&&dealerBJ) return {text:"🤝 Égalité BJ",gain:rp.bet};
+        // BJ joueur vs dealer normal → +150%
+        if(playerBJ) return {text:"🎰 Blackjack! +150%",gain:rp.bet*2.5};
+        // BJ dealer vs joueur normal → perdu
+        if(dealerBJ) return {text:"❌ Blackjack dealer",gain:0};
         if(ps>21) return {text:"💥 Bust",gain:0};
         if(ds>21||ps>ds) return {text:"✅ Gagné!",gain:rp.bet*2};
         if(ps===ds) return {text:"🤝 Égalité",gain:rp.bet};
@@ -1353,11 +1396,12 @@ function RoomScreen({ user, roomId, isHost: initIsHost, onLeave, onUpdateTokens 
                 <div style={{color:isMe?"#ffd700":"#ccc",fontSize:9,fontWeight:700,whiteSpace:"nowrap"}}>
                   {isActing?"▶ ":""}{rp.players?.username||"?"}{isMe?" (moi)":""}
                 </div>
-                {sc!==null&&<div style={{color:bust?"#e74c3c":"#aaa",fontSize:9,fontWeight:700}}>{sc}{bust?" 💥":""}</div>}
-                {rp.bet>0&&<div style={{color:"rgba(255,215,0,.7)",fontSize:8}}>Mise:{rp.bet}</div>}
+                {sc!==null&&<div style={{color:bust?"#e74c3c":"#4caf50",fontSize:9,fontWeight:700}}>{sc}{bust?" 💥":""}</div>}
+                {rp.bet>0&&<div style={{color:"#ffa500",fontSize:8,fontWeight:600}}>Mise: {rp.bet}🪙</div>}
+                <div style={{color:"#555",fontSize:8}}>🪙 {rp.players?.tokens?.toLocaleString()??"-"}</div>
                 {isDone&&rp.result&&<div style={{color:"#4caf50",fontSize:8,fontWeight:700}}>{rp.result[0]?.text||"✓"}</div>}
-                {rp.status==="waiting"&&roomStatus==="waiting"&&<div style={{color:"#555",fontSize:8}}>—</div>}
-                {rp.status==="ready"&&roomStatus==="waiting"&&<div style={{color:"#4caf50",fontSize:8}}>✓ Prêt</div>}
+                {rp.status==="waiting"&&roomStatus==="waiting"&&<div style={{color:"#555",fontSize:8}}>Pas encore misé</div>}
+                {rp.status==="ready"&&roomStatus==="waiting"&&<div style={{color:"#4caf50",fontSize:8}}>✓ Misé</div>}
               </div>
             </div>
           );
@@ -1396,12 +1440,24 @@ function RoomScreen({ user, roomId, isHost: initIsHost, onLeave, onUpdateTokens 
                 }
               </div>
             </div>
-            {isHost&&(
-              <button onClick={startGame} style={{width:"100%",padding:13,background:"linear-gradient(135deg,#27ae60,#1e8449)",border:"none",borderRadius:12,fontSize:15,fontWeight:900,color:"#fff",cursor:"pointer",boxShadow:"0 4px 16px rgba(39,174,96,.4)"}}>
-                ▶ Distribuer ({roomPlayers.filter(p=>p.status==="ready").length}/{roomPlayers.length} prêts)
-              </button>
-            )}
-            {!isHost&&<div style={{color:"#444",textAlign:"center",fontSize:12,padding:6}}>En attente du créateur…</div>}
+            {/* Progression des mises en temps réel */}
+            {(()=>{
+              const ready=roomPlayers.filter(p=>p.status==="ready").length;
+              const total=roomPlayers.length;
+              const pct=total>0?ready/total*100:0;
+              return(
+                <div>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+                    <span style={{color:"#555",fontSize:11}}>Joueurs prêts</span>
+                    <span style={{color:"#4caf50",fontSize:11,fontWeight:700}}>{ready}/{total}</span>
+                  </div>
+                  <div style={{height:4,background:"#1a1a2e",borderRadius:2,overflow:"hidden"}}>
+                    <div style={{height:"100%",width:`${pct}%`,background:"linear-gradient(90deg,#27ae60,#4caf50)",borderRadius:2,transition:"width .4s"}}/>
+                  </div>
+                  <div style={{color:"#333",textAlign:"center",fontSize:11,marginTop:6}}>La partie démarre automatiquement quand tout le monde a misé</div>
+                </div>
+              );
+            })()}
           </div>
         )}
 
