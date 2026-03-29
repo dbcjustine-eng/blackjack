@@ -1200,10 +1200,17 @@ function RoomScreen({ user, roomId, isHost: initIsHost, onLeave, onUpdateTokens 
     const deck=[...(fr.deck||[])];
     const c=deck.pop();
     const hands=JSON.parse(JSON.stringify(myRp.hands));
-    hands[myRp.active_hand].push({card:c,faceUp:true,visible:true});
-    const score=handScore(hands[myRp.active_hand].map(e=>e.card));
-    const newStatus=score>=21?"done":"playing";
-    await supabase.from("room_players").update({hands,status:newStatus}).eq("id",myRp.id);
+    const activeIdx=myRp.active_hand||0;
+    hands[activeIdx].push({card:c,faceUp:true,visible:true});
+    const score=handScore(hands[activeIdx].map(e=>e.card||e));
+    // Si split: vérifier s'il reste une main à jouer
+    let newStatus="playing", newActiveHand=activeIdx;
+    if(score>=21) {
+      // Passer à la main suivante si split
+      if(activeIdx+1 < hands.length) { newActiveHand=activeIdx+1; newStatus="playing"; }
+      else newStatus="done";
+    }
+    await supabase.from("room_players").update({hands,status:newStatus,active_hand:newActiveHand}).eq("id",myRp.id);
     await supabase.from("rooms").update({deck}).eq("id",roomId);
     if (newStatus==="done") await advanceToNext(myRp.seat);
     busy.current=false;
@@ -1213,8 +1220,15 @@ function RoomScreen({ user, roomId, isHost: initIsHost, onLeave, onUpdateTokens 
   async function stand() {
     if (!myRp||myRp.status!=="playing"||room?.action_seat!==myRp.seat||busy.current) return;
     busy.current=true;
-    await supabase.from("room_players").update({status:"done"}).eq("id",myRp.id);
-    await advanceToNext(myRp.seat);
+    const activeIdx=myRp.active_hand||0;
+    const hands=myRp.hands||[[]];
+    // Si split et encore une main à jouer
+    if(activeIdx+1 < hands.length) {
+      await supabase.from("room_players").update({active_hand:activeIdx+1,status:"playing"}).eq("id",myRp.id);
+    } else {
+      await supabase.from("room_players").update({status:"done"}).eq("id",myRp.id);
+      await advanceToNext(myRp.seat);
+    }
     busy.current=false;
   }
 
@@ -1266,6 +1280,49 @@ function RoomScreen({ user, roomId, isHost: initIsHost, onLeave, onUpdateTokens 
     await supabase.from("rooms").update({status:"finished"}).eq("id",roomId);
   }
 
+  // ── Double Down ──────────────────────────────────────────────────────────
+  async function doubleDown() {
+    if (!myRp||myRp.status!=="playing"||room?.action_seat!==myRp.seat||busy.current) return;
+    if (user.tokens < myRp.bet) return;
+    busy.current=true;
+    onUpdateTokens(-myRp.bet,""); // débite la 2e mise
+    const { data: fr } = await supabase.from("rooms").select("deck").eq("id",roomId).single();
+    const deck=[...(fr.deck||[])];
+    const c=deck.pop();
+    const hands=JSON.parse(JSON.stringify(myRp.hands));
+    hands[myRp.active_hand].push({card:c,faceUp:true,visible:true});
+    // Double = une carte puis stand forcé
+    await supabase.from("room_players").update({
+      hands, status:"done",
+      bet: myRp.bet*2
+    }).eq("id",myRp.id);
+    await supabase.from("rooms").update({deck}).eq("id",roomId);
+    await advanceToNext(myRp.seat);
+    busy.current=false;
+  }
+
+  // ── Split ─────────────────────────────────────────────────────────────────
+  async function splitHand() {
+    if (!myRp||myRp.status!=="playing"||room?.action_seat!==myRp.seat||busy.current) return;
+    if (user.tokens < myRp.bet) return;
+    const myCards=myRp.hands[0]||[];
+    const c1=myCards[0], c2=myCards[1];
+    if (!c1||!c2||cardValue((c1.card||c1).rank)!==cardValue((c2.card||c2).rank)) return;
+    busy.current=true;
+    onUpdateTokens(-myRp.bet,""); // 2e mise pour le split
+    const { data: fr } = await supabase.from("rooms").select("deck").eq("id",roomId).single();
+    const deck=[...(fr.deck||[])];
+    // Distribuer une carte à chaque main
+    const n1=deck.pop(), n2=deck.pop();
+    const hand1=[c1,{card:n1,faceUp:true,visible:true}];
+    const hand2=[c2,{card:n2,faceUp:true,visible:true}];
+    await supabase.from("room_players").update({
+      hands:[hand1,hand2], active_hand:0, status:"playing",
+    }).eq("id",myRp.id);
+    await supabase.from("rooms").update({deck}).eq("id",roomId);
+    busy.current=false;
+  }
+
   async function leaveRoom() {
     await supabase.from("room_players").delete().eq("room_id",roomId).eq("player_id",user.id);
     if(isHost) await supabase.from("rooms").delete().eq("id",roomId);
@@ -1273,6 +1330,7 @@ function RoomScreen({ user, roomId, isHost: initIsHost, onLeave, onUpdateTokens 
   }
 
   async function newGame() {
+    // Reset tout le monde en waiting — la partie repartira quand tout le monde remet une mise
     await supabase.from("room_players").update({hands:[[]],bet:0,status:"waiting",result:[],active_hand:0}).eq("room_id",roomId);
     await supabase.from("rooms").update({status:"waiting",dealer_cards:[],deck:freshDeck(),action_seat:0}).eq("id",roomId);
   }
@@ -1365,8 +1423,8 @@ function RoomScreen({ user, roomId, isHost: initIsHost, onLeave, onUpdateTokens 
           const isMe=rp.player_id===user.id;
           const p=bjSeatPos(idx,total);
           const hands=rp.hands||[[]];
-          const cards=hands[0]||[];
-          const sc=cards.length>0?handScore(cards.map(e=>e.card||e)):null;
+          const activeHand=hands[rp.active_hand||0]||hands[0]||[];
+          const sc=activeHand.length>0?handScore(activeHand.map(e=>e.card||e)):null;
           const bust=sc>21;
           const isActing=room?.action_seat===rp.seat&&roomStatus==="playing"&&rp.status==="playing";
           const isDone=rp.status==="done"||rp.status==="finished";
@@ -1378,30 +1436,40 @@ function RoomScreen({ user, roomId, isHost: initIsHost, onLeave, onUpdateTokens 
               display:"flex",flexDirection:"column",alignItems:"center",gap:2,
               opacity:isDone&&!isMe?.65:1,transition:"opacity .3s",
             }}>
-              {cards.length>0&&(
-                <div style={{display:"flex",gap:3,marginBottom:2}}>
-                  {cards.map((e,i)=>bjCard(e,i,!isMe))}
-                </div>
-              )}
+              {hands.map((hand,hi)=>{
+                const hcards=hand||[];
+                if(hcards.length===0) return null;
+                const hsc=handScore(hcards.map(e=>e.card||e));
+                const hbust=hsc>21;
+                const isActiveHand=hi===(rp.active_hand||0)&&isActing;
+                return(
+                  <div key={hi} style={{display:"flex",flexDirection:"column",alignItems:"center",marginBottom:2}}>
+                    <div style={{display:"flex",gap:3}}>
+                      {hcards.map((e,i)=>bjCard(e,i,!isMe))}
+                    </div>
+                    {hands.length>1&&<div style={{fontSize:8,color:hbust?"#e74c3c":isActiveHand?"#ffd700":"#888"}}>{hsc}{hbust?" 💥":""}{isActiveHand?" ◀":""}</div>}
+                  </div>
+                );
+              })}
               <div style={{
                 background:isActing?"rgba(255,215,0,.15)":"rgba(0,0,0,.75)",
                 border:`2px solid ${isActing?"#ffd700":isMe?"#3a3a2e":"#1a1a1a"}`,
-                borderRadius:10,padding:"3px 8px",textAlign:"center",minWidth:60,
+                borderRadius:10,padding:"4px 10px",textAlign:"center",minWidth:72,
                 boxShadow:isActing?"0 0 18px rgba(255,215,0,.6)":"none",
                 transition:"all .2s",position:"relative",
               }}>
                 {playPos>0&&roomStatus==="playing"&&(
                   <div style={{position:"absolute",top:-8,left:-6,background:isActing?"#ffd700":"#2a2a3e",color:isActing?"#111":"#888",fontSize:8,fontWeight:900,borderRadius:4,padding:"1px 4px"}}>#{playPos}</div>
                 )}
-                <div style={{color:isMe?"#ffd700":"#ccc",fontSize:9,fontWeight:700,whiteSpace:"nowrap"}}>
+                <div style={{color:isMe?"#ffd700":"#ccc",fontSize:11,fontWeight:800,whiteSpace:"nowrap"}}>
                   {isActing?"▶ ":""}{rp.players?.username||"?"}{isMe?" (moi)":""}
                 </div>
-                {sc!==null&&<div style={{color:bust?"#e74c3c":"#4caf50",fontSize:9,fontWeight:700}}>{sc}{bust?" 💥":""}</div>}
-                {rp.bet>0&&<div style={{color:"#ffa500",fontSize:8,fontWeight:600}}>Mise: {rp.bet}🪙</div>}
-                <div style={{color:"#555",fontSize:8}}>🪙 {rp.players?.tokens?.toLocaleString()??"-"}</div>
-                {isDone&&rp.result&&<div style={{color:"#4caf50",fontSize:8,fontWeight:700}}>{rp.result[0]?.text||"✓"}</div>}
-                {rp.status==="waiting"&&roomStatus==="waiting"&&<div style={{color:"#555",fontSize:8}}>Pas encore misé</div>}
-                {rp.status==="ready"&&roomStatus==="waiting"&&<div style={{color:"#4caf50",fontSize:8}}>✓ Misé</div>}
+                {sc!==null&&<div style={{color:bust?"#e74c3c":"#4caf50",fontSize:11,fontWeight:800}}>{sc}{bust?" 💥":""}</div>}
+                {rp.bet>0&&<div style={{color:"#ffa500",fontSize:10,fontWeight:700}}>Mise {rp.bet}</div>}
+                <div style={{color:"#666",fontSize:10,fontWeight:600}}>Solde {rp.players?.tokens?.toLocaleString()??"-"}</div>
+                {isDone&&rp.result&&<div style={{color:"#4caf50",fontSize:10,fontWeight:700}}>{rp.result[0]?.text||"✓"}</div>}
+                {rp.status==="waiting"&&roomStatus==="waiting"&&<div style={{color:"#444",fontSize:9}}>pas encore misé</div>}
+                {rp.status==="ready"&&roomStatus==="waiting"&&<div style={{color:"#4caf50",fontSize:9,fontWeight:700}}>✓ misé</div>}
               </div>
             </div>
           );
@@ -1430,9 +1498,9 @@ function RoomScreen({ user, roomId, isHost: initIsHost, onLeave, onUpdateTokens 
               {/* Input libre */}
               <div style={{display:"flex",gap:6}}>
                 <div style={{position:"relative",flex:1}}>
-                  <span style={{position:"absolute",left:10,top:"50%",transform:"translateY(-50%)",color:"#ffd700",fontSize:13}}>🪙</span>
+                  <span style={{position:"absolute",left:8,top:"50%",transform:"translateY(-50%)",color:"#ffd700",fontSize:11,fontWeight:700,pointerEvents:"none"}}>Mise</span>
                   <input type="number" min="1" value={betInput} onChange={e=>setBetInput(e.target.value)}
-                    style={{width:"100%",background:"#0e0e1e",border:"1.5px solid #2a2a3e",borderRadius:10,padding:"9px 10px 9px 28px",color:"#ffd700",fontSize:15,fontWeight:800,outline:"none",boxSizing:"border-box"}}/>
+                    style={{width:"100%",background:"#0e0e1e",border:"1.5px solid #2a2a3e",borderRadius:10,padding:"9px 10px 9px 44px",color:"#ffd700",fontSize:15,fontWeight:800,outline:"none",boxSizing:"border-box"}}/>
                 </div>
                 {myRp?.status!=="ready"
                   ?<button onClick={placeBet} style={{padding:"9px 16px",background:"linear-gradient(135deg,#ffd700,#ffaa00)",border:"none",borderRadius:10,fontSize:14,fontWeight:800,color:"#111",cursor:"pointer"}}>Miser ✓</button>
@@ -1464,12 +1532,24 @@ function RoomScreen({ user, roomId, isHost: initIsHost, onLeave, onUpdateTokens 
         {/* JEU */}
         {roomStatus==="playing"&&(
           <div>
-            {isMyTurn&&(
-              <div style={{display:"flex",gap:8}}>
-                <button onClick={hit} style={{flex:1,padding:13,borderRadius:12,fontSize:15,fontWeight:800,border:"none",background:"linear-gradient(135deg,#27ae60,#1e8449)",color:"#fff",cursor:"pointer",boxShadow:"0 4px 14px rgba(39,174,96,.35)"}}>HIT</button>
-                <button onClick={stand} style={{flex:1,padding:13,borderRadius:12,fontSize:15,fontWeight:800,border:"none",background:"linear-gradient(135deg,#e74c3c,#c0392b)",color:"#fff",cursor:"pointer",boxShadow:"0 4px 14px rgba(231,76,60,.35)"}}>STAND</button>
-              </div>
-            )}
+            {isMyTurn&&(()=>{
+              const myCards=(myRp?.hands?.[0]||[]);
+              const myCardObjs=myCards.map(e=>e.card||e);
+              const canDouble=myCards.length===2&&user.tokens>=myRp?.bet;
+              const canSplit=myCards.length===2&&cardValue(myCardObjs[0]?.rank)===cardValue(myCardObjs[1]?.rank)&&user.tokens>=myRp?.bet;
+              return(
+                <div>
+                  <div style={{display:"flex",gap:7,marginBottom:7}}>
+                    <button onClick={hit} style={{flex:1,padding:12,borderRadius:11,fontSize:14,fontWeight:800,border:"none",background:"linear-gradient(135deg,#27ae60,#1e8449)",color:"#fff",cursor:"pointer",boxShadow:"0 3px 12px rgba(39,174,96,.35)"}}>HIT</button>
+                    <button onClick={stand} style={{flex:1,padding:12,borderRadius:11,fontSize:14,fontWeight:800,border:"none",background:"linear-gradient(135deg,#e74c3c,#c0392b)",color:"#fff",cursor:"pointer",boxShadow:"0 3px 12px rgba(231,76,60,.35)"}}>STAND</button>
+                  </div>
+                  <div style={{display:"flex",gap:7}}>
+                    {canDouble&&<button onClick={doubleDown} style={{flex:1,padding:11,borderRadius:11,fontSize:13,fontWeight:800,border:"none",background:"linear-gradient(135deg,#8e44ad,#6c3483)",color:"#fff",cursor:"pointer",boxShadow:"0 3px 10px rgba(142,68,173,.35)"}}>2×</button>}
+                    {canSplit&&<button onClick={splitHand} style={{flex:1,padding:11,borderRadius:11,fontSize:13,fontWeight:800,border:"none",background:"linear-gradient(135deg,#e67e22,#d35400)",color:"#fff",cursor:"pointer",boxShadow:"0 3px 10px rgba(230,126,34,.4)",animation:"splitPulse 1.2s ease-in-out infinite"}}>SPLIT</button>}
+                  </div>
+                </div>
+              );
+            })()}
             {!isMyTurn&&!iAmDone&&(
               <div style={{textAlign:"center",padding:8}}>
                 {room?.action_seat>=0?(
@@ -1486,11 +1566,38 @@ function RoomScreen({ user, roomId, isHost: initIsHost, onLeave, onUpdateTokens 
           </div>
         )}
 
-        {/* FIN */}
+        {/* FIN — relance auto quand chacun remet une mise */}
         {roomStatus==="finished"&&(
-          <div style={{display:"flex",gap:8}}>
-            {isHost&&<button onClick={newGame} style={{flex:1,padding:13,borderRadius:12,fontSize:14,fontWeight:800,border:"none",background:"linear-gradient(135deg,#ffd700,#ffaa00)",color:"#111",cursor:"pointer"}}>↺ Rejouer</button>}
-            <button onClick={leaveRoom} style={{flex:1,padding:13,borderRadius:12,fontSize:14,fontWeight:800,border:"1px solid #333",background:"transparent",color:"#888",cursor:"pointer"}}>Quitter</button>
+          <div>
+            <div style={{marginBottom:8}}>
+              <div style={{display:"flex",gap:5,marginBottom:6}}>
+                {[20,50,100].map(v=>(
+                  <button key={v} onClick={()=>setBetInput(String(Math.min(v,user.tokens)))} style={{
+                    flex:1,padding:"7px 0",borderRadius:8,fontSize:12,fontWeight:700,border:"none",cursor:"pointer",
+                    background:betInput===String(v)?"#ffd700":"#141424",color:betInput===String(v)?"#111":"#666",
+                  }}>{v}</button>
+                ))}
+                <button onClick={()=>setBetInput(String(Math.min((parseInt(betInput||"0")||20)*2,user.tokens)))} style={{flex:1,padding:"7px 0",borderRadius:8,fontSize:12,fontWeight:700,border:"1px solid #222",background:"#0e0e1e",color:"#888",cursor:"pointer"}}>×2</button>
+                <button onClick={()=>setBetInput(String(Math.max(1,Math.floor((parseInt(betInput||"0")||20)/2))))} style={{flex:1,padding:"7px 0",borderRadius:8,fontSize:12,fontWeight:700,border:"1px solid #222",background:"#0e0e1e",color:"#888",cursor:"pointer"}}>÷2</button>
+              </div>
+              <div style={{display:"flex",gap:6}}>
+                <div style={{position:"relative",flex:1}}>
+                  <span style={{position:"absolute",left:10,top:"50%",transform:"translateY(-50%)",color:"#ffd700",fontSize:13}}>Mise</span>
+                  <input type="number" min="1" value={betInput} onChange={e=>setBetInput(e.target.value)}
+                    style={{width:"100%",background:"#0e0e1e",border:"1.5px solid #2a2a3e",borderRadius:10,padding:"9px 10px 9px 42px",color:"#ffd700",fontSize:15,fontWeight:800,outline:"none",boxSizing:"border-box"}}/>
+                </div>
+                {myRp?.status!=="ready"
+                  ?<button onClick={placeBet} style={{padding:"9px 16px",background:"linear-gradient(135deg,#ffd700,#ffaa00)",border:"none",borderRadius:10,fontSize:14,fontWeight:800,color:"#111",cursor:"pointer"}}>↺ Rejouer</button>
+                  :<div style={{padding:"9px 14px",color:"#4caf50",fontSize:13,fontWeight:700,display:"flex",alignItems:"center"}}>✓ Prêt</div>
+                }
+              </div>
+            </div>
+            {(()=>{
+              const ready=roomPlayers.filter(p=>p.status==="ready").length;
+              const tot=roomPlayers.length;
+              return <div style={{color:"#333",textAlign:"center",fontSize:11}}>En attente: {ready}/{tot} ont choisi leur mise</div>;
+            })()}
+            <button onClick={leaveRoom} style={{width:"100%",marginTop:8,padding:10,borderRadius:12,fontSize:13,fontWeight:700,border:"1px solid #222",background:"transparent",color:"#555",cursor:"pointer"}}>Quitter la table</button>
           </div>
         )}
       </div>
