@@ -1691,19 +1691,12 @@ export default function App() {
 
   return (
     <div style={{
-      maxWidth:390, margin:"0 auto",
-      height:"100vh", maxHeight:844,
+      width:"100%", height:"100dvh",
       background:"#080812",
       display:"flex", flexDirection:"column",
       fontFamily:"'SF Pro Display',-apple-system,BlinkMacSystemFont,sans-serif",
-      color:"#fff", borderRadius:40, overflow:"hidden",
-      boxShadow:"0 0 100px rgba(0,0,0,.9)",
+      color:"#fff", overflow:"hidden",
     }}>
-      {/* Dynamic Island */}
-      <div style={{background:"#080812",height:44,borderRadius:"40px 40px 0 0",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
-        <div style={{width:126,height:36,background:"#000",borderRadius:20}}/>
-      </div>
-
       <div style={{flex:1,overflow:"hidden",display:"flex",flexDirection:"column"}}>
         {!currentUser && <LoginScreen onLogin={setCurrentUser}/>}
         {currentUser && currentUser.is_admin && <AdminPanel currentUser={currentUser} onLogout={handleLogout}/>}
