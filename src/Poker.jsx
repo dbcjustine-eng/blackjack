@@ -240,39 +240,83 @@ export function PokerSoloBots({ user, botCount, onBack, onUpdateTokens }) {
 
   function act(action, raiseAmt=0) {
     setGame(prev=>{
-      let g={...prev,bots:prev.bots.map(b=>({...b})),msg:""};
+      let g={...prev,bots:prev.bots.map(b=>({...b}))};
       const tc=Math.max(0,g.currentBet-(g.playerBet||0));
-      if(action==="fold"){g.playerStatus="folded";}
-      else if(action==="call"){const c=Math.min(tc,g.playerTokens);g.playerTokens-=c;g.playerBet=(g.playerBet||0)+c;g.playerTotalBet=(g.playerTotalBet||0)+c;g.pot+=c;}
-      else if(action==="raise"){const c=Math.min(tc,g.playerTokens);const tot=Math.min(c+raiseAmt,g.playerTokens);g.playerTokens-=tot;g.playerBet=(g.playerBet||0)+tot;g.playerTotalBet=(g.playerTotalBet||0)+tot;g.pot+=tot;g.currentBet=g.playerBet;}
+      if(action==="fold"){
+        g.playerStatus="folded";
+        g.msg="👤 Vous passez (fold)";
+      } else if(action==="call"){
+        const c=Math.min(tc,g.playerTokens);
+        g.playerTokens-=c;g.playerBet=(g.playerBet||0)+c;g.playerTotalBet=(g.playerTotalBet||0)+c;g.pot+=c;
+        g.msg=tc===0?"👤 Vous checkez":"👤 Vous suivez "+c+"🪙";
+      } else if(action==="raise"){
+        const c=Math.min(tc,g.playerTokens);
+        const tot=Math.min(c+raiseAmt,g.playerTokens);
+        g.playerTokens-=tot;g.playerBet=(g.playerBet||0)+tot;g.playerTotalBet=(g.playerTotalBet||0)+tot;g.pot+=tot;
+        g.currentBet=g.playerBet;
+        g.msg="👤 Vous relancez "+tot+"🪙 💪";
+      }
       return advance(g,action==="raise");
     });
   }
 
-  // Bots réactifs — simple et robuste
+  // Bots réactifs — délai + message visible
   const botTimerRef = useRef(null);
+  const msgTimerRef = useRef(null);
   useEffect(()=>{
     clearTimeout(botTimerRef.current);
+    clearTimeout(msgTimerRef.current);
     if(!["preflop","flop","turn","river"].includes(game.phase)) return;
     if(game.actionSeat===0) return;
     const snapshot = { seat: game.actionSeat, phase: game.phase };
+
+    // Délai : 1.2s à 2.2s pour que le joueur lise le message précédent
     botTimerRef.current = setTimeout(()=>{
+      // Phase 1 : calculer et afficher l'action du bot (mais pas encore avancer)
+      let actionMsg = "";
+      let decision = "";
       setGame(prev=>{
-        // Vérifier que le tour n'a pas changé entre-temps
         if(prev.actionSeat!==snapshot.seat||prev.phase!==snapshot.phase) return prev;
         if(!["preflop","flop","turn","river"].includes(prev.phase)) return prev;
         let g={...prev,bots:prev.bots.map(b=>({...b}))};
         const b=g.bots.find(x=>x.seat===g.actionSeat);
-        if(!b||b.status!=="active") return advance(g,false);
-        const decision=botAction(b,g);
+        if(!b||b.status!=="active"){
+          return advance(g,false);
+        }
+        decision=botAction(b,g);
         const tc=Math.max(0,g.currentBet-(b.betThisRound||0));
-        if(decision==="fold"){b.status="folded";g.msg=b.icon+" "+b.name+" passe";}
-        else if(decision==="call"||decision==="check"){const c=tc>0?Math.min(tc,b.tokens):0;if(c>0){b.tokens-=c;b.betThisRound=(b.betThisRound||0)+c;b.totalBet=(b.totalBet||0)+c;g.pot+=c;}g.msg=tc===0?b.icon+" "+b.name+" check":b.icon+" "+b.name+" call "+c+"🪙";}
-        else{const extra=Math.max(BIG_BLIND,Math.floor(BIG_BLIND+Math.random()*g.pot*0.35));const tot=Math.min(tc+extra,b.tokens);b.tokens-=tot;b.betThisRound=(b.betThisRound||0)+tot;b.totalBet=(b.totalBet||0)+tot;g.pot+=tot;g.currentBet=b.betThisRound;g.msg=b.icon+" "+b.name+" relance "+tot+"🪙 💪";}
-        return advance(g,decision==="raise");
+
+        // Appliquer l'action
+        if(decision==="fold"){
+          b.status="folded";
+          g.msg=b.icon+" "+b.name+" passe ❌";
+        } else if(decision==="call"||decision==="check"){
+          const c=tc>0?Math.min(tc,b.tokens):0;
+          if(c>0){b.tokens-=c;b.betThisRound=(b.betThisRound||0)+c;b.totalBet=(b.totalBet||0)+c;g.pot+=c;}
+          g.msg=tc===0?b.icon+" "+b.name+" check ✓":b.icon+" "+b.name+" suit "+c+"🪙";
+        } else {
+          const extra=Math.max(BIG_BLIND,Math.floor(BIG_BLIND+Math.random()*g.pot*0.35));
+          const tot=Math.min(tc+extra,b.tokens);
+          b.tokens-=tot;b.betThisRound=(b.betThisRound||0)+tot;b.totalBet=(b.totalBet||0)+tot;g.pot+=tot;
+          g.currentBet=b.betThisRound;
+          g.msg=b.icon+" "+b.name+" relance "+tot+"🪙 💪";
+        }
+
+        // Phase 2 : avancer après 900ms (le joueur voit l'action)
+        const advanceDecision=decision;
+        msgTimerRef.current=setTimeout(()=>{
+          setGame(p2=>{
+            if(p2.phase==="showdown") return p2;
+            let g2={...p2,bots:p2.bots.map(b=>({...b}))};
+            return advance(g2, advanceDecision==="raise");
+          });
+        }, 900);
+
+        return g; // afficher l'action mais ne pas encore avancer
       });
-    }, 1000+Math.random()*800);
-    return()=>clearTimeout(botTimerRef.current);
+    }, 1200+Math.random()*800);
+
+    return()=>{clearTimeout(botTimerRef.current);clearTimeout(msgTimerRef.current);};
   },[game.actionSeat,game.phase]);
 
   // Timer 20s joueur
@@ -358,7 +402,21 @@ export function PokerSoloBots({ user, botCount, onBack, onUpdateTokens }) {
         )}
 
         {g.msg&&(
-          <div style={{position:"absolute",left:"50%",top:g.phase==="showdown"?"26%":"23%",transform:"translateX(-50%)",background:"rgba(0,0,0,.85)",borderRadius:10,padding:"5px 14px",color:g.phase==="showdown"?"#ffd700":"#ccc",fontSize:g.phase==="showdown"?13:11,fontWeight:g.phase==="showdown"?800:400,whiteSpace:"nowrap",maxWidth:"88%",textAlign:"center",lineHeight:1.4,textShadow:g.phase==="showdown"?"0 0 16px rgba(255,215,0,.6)":"none",animation:g.phase==="showdown"?"tableGlow 1s ease-in-out infinite":"none",border:g.phase==="showdown"?"1px solid rgba(255,215,0,.3)":"none"}}>
+          <div style={{
+            position:"absolute",left:"50%",
+            top:g.phase==="showdown"?"24%":"20%",
+            transform:"translateX(-50%)",
+            background:"rgba(0,0,0,.88)",borderRadius:12,
+            padding:"7px 18px",
+            color:g.phase==="showdown"?"#ffd700":"#fff",
+            fontSize:g.phase==="showdown"?15:13,
+            fontWeight:700,
+            whiteSpace:"nowrap",maxWidth:"90%",textAlign:"center",lineHeight:1.4,
+            textShadow:g.phase==="showdown"?"0 0 16px rgba(255,215,0,.6)":"none",
+            animation:g.phase==="showdown"?"tableGlow 1s ease-in-out infinite":"none",
+            border:`1px solid ${g.phase==="showdown"?"rgba(255,215,0,.4)":"rgba(255,255,255,.12)"}`,
+            boxShadow:"0 4px 20px rgba(0,0,0,.6)",
+          }}>
             {g.msg}
           </div>
         )}
