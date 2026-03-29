@@ -112,415 +112,366 @@ function botDecide(bot, room) {
 
 // ── POKER SOLO VS BOTS ────────────────────────────────────────────────────────
 export function PokerSoloBots({ user, botCount, onBack, onUpdateTokens }) {
-  const BIG_BLIND = 10, SMALL_BLIND = 5;
-  const BOT_TOKENS = 1000;
+  const BB = 10, SB = 5;
 
-  function makeBots(n) {
-    return Array.from({length:n}, (_,i) => ({
-      id: "bot-"+i, name: BOT_NAMES[i], icon: BOT_STYLES[i],
-      tokens: BOT_TOKENS, seat: i+1,
-      holeCards: [], betThisRound: 0, totalBet: 0,
-      status: "active", // active|folded|allin
-      isBot: true,
+  function mkBots(existing) {
+    if (existing) return existing.map((b,i)=>({...b,seat:i+1,betThisRound:0,totalBet:0,status:"active",holeCards:[]}));
+    return Array.from({length:botCount},(_,i)=>({
+      id:"b"+i, name:BOT_NAMES[i], icon:BOT_STYLES[i],
+      tokens:1000, seat:i+1, holeCards:[], betThisRound:0, totalBet:0, status:"active",
     }));
   }
 
-  function initGame(playerTokens, existingBots) {
-    const deck = freshDeck();
-    const bots = existingBots || makeBots(botCount);
-    const allSeats = [0, ...bots.map(b=>b.seat)];
-
-    // dealer tourne
-    const dealerSeat = 0; // simplifié: dealer=joueur au début
-    const sbSeat = bots[0].seat;
-    const bbSeat = bots[1]?.seat ?? 0;
-    const firstAction = bots[2]?.seat ?? 0;
-
-    // Distribuer cartes
-    const playerCards = [deck.pop(), deck.pop()];
-    const newBots = bots.map(b => ({
-      ...b, holeCards:[deck.pop(),deck.pop()],
-      betThisRound:0, totalBet:0, status:"active",
-    }));
-
-    // Blinds
-    let pot = SMALL_BLIND + BIG_BLIND;
-    newBots[0].betThisRound = SMALL_BLIND;
-    newBots[0].totalBet = SMALL_BLIND;
-    newBots[0].tokens -= SMALL_BLIND;
-    if (newBots[1]) {
-      newBots[1].betThisRound = BIG_BLIND;
-      newBots[1].totalBet = BIG_BLIND;
-      newBots[1].tokens -= BIG_BLIND;
-    }
-
+  function newHand(pTokens, existBots) {
+    const dk = freshDeck();
+    const bots = mkBots(existBots ? existBots.filter(b=>b.tokens>0) : null);
+    // player = seat 0, bots = seat 1..n
+    const allActive = [0,...bots.map(b=>b.seat)];
+    // blinds: seat1=SB, seat2=BB
+    bots.forEach((b,i)=>{
+      b.holeCards=[dk.pop(),dk.pop()];
+      if(i===0){b.betThisRound=SB;b.totalBet=SB;b.tokens-=SB;}
+      if(i===1){b.betThisRound=BB;b.totalBet=BB;b.tokens-=BB;}
+    });
+    const pCards=[dk.pop(),dk.pop()];
+    // first to act after BB = seat after BB
+    const firstAct = bots[2]?.seat ?? 0;
     return {
-      deck, community:[], pot,
-      currentBet: BIG_BLIND,
-      phase:"preflop", // preflop|flop|turn|river|showdown
-      actionSeat: bots[2]?.seat ?? 0, // après BB
-      dealerSeat: 0,
-      playerCards, playerBet:0, playerTotalBet:0,
-      playerStatus:"active",
-      bots: newBots,
-      playerTokens,
-      msg:"", winners:[],
-      botThinking: false,
+      dk, community:[], pot:SB+BB, currentBet:BB,
+      phase:"preflop", actionSeat:firstAct,
+      pCards, pBet:0, pTotal:0, pStatus:"active",
+      pTokens, bots, msg:"", winners:[], lastAct:"",
     };
   }
 
-  const [game, setGame] = useState(() => initGame(user.tokens));
-  const [raiseInput, setRaiseInput] = useState("");
-  const processing = useRef(false);
+  const [G, setG] = useState(()=>newHand(user.tokens));
+  const [rInput, setRInput] = useState("");
+  const timerRef = useRef(null);
 
-  const isMyTurn = game.actionSeat===0 && game.playerStatus==="active" &&
-    ["preflop","flop","turn","river"].includes(game.phase);
-  const toCall = Math.max(0, game.currentBet - (game.playerBet||0));
-  const canCheck = toCall === 0;
+  const isMyTurn = G.actionSeat===0 && G.pStatus==="active" && ["preflop","flop","turn","river"].includes(G.phase);
+  const toCall = Math.max(0,(G.currentBet||0)-(G.pBet||0));
+  const canCheck = toCall===0;
 
-  // ── Actions joueur ──
-  function playerFold() { if (!isMyTurn||processing.current) return; applyPlayerAction("fold"); }
-  function playerCall() { if (!isMyTurn||processing.current) return; applyPlayerAction("call"); }
-  function playerCheck() { if (!isMyTurn||processing.current) return; applyPlayerAction("check"); }
-  function playerRaise() {
-    if (!isMyTurn||processing.current) return;
-    const amt = parseInt(raiseInput)||0;
-    if (amt < BIG_BLIND) return;
-    setRaiseInput("");
-    applyPlayerAction("raise", amt);
+  // ─── POSITIONS TABLE OVALE ───────────────────────────────────────────────────
+  function pos(seat) {
+    const seats = [0,...G.bots.map(b=>b.seat)];
+    const idx = seats.indexOf(seat);
+    const n = seats.length;
+    const angle = (Math.PI/2) - (idx/n)*2*Math.PI;
+    return { x: 50 + 43*Math.cos(angle), y: 50 - 37*Math.sin(angle) };
   }
 
-  function applyPlayerAction(action, raiseAmt=0) {
-    processing.current = true;
-    setGame(prev => {
-      let g = {...prev, bots:[...prev.bots.map(b=>({...b}))], msg:""};
-      if (action==="fold") {
-        g.playerStatus = "folded";
-      } else if (action==="call") {
-        const call = Math.min(toCall, g.playerTokens);
-        g.playerTokens -= call;
-        g.playerBet = (g.playerBet||0)+call;
-        g.playerTotalBet = (g.playerTotalBet||0)+call;
-        g.pot += call;
-      } else if (action==="raise") {
-        const call = Math.min(toCall, g.playerTokens);
-        const total = Math.min(call+raiseAmt, g.playerTokens);
-        g.playerTokens -= total;
-        g.playerBet = (g.playerBet||0)+total;
-        g.playerTotalBet = (g.playerTotalBet||0)+total;
-        g.pot += total;
-        g.currentBet = g.playerBet;
-      }
-      // check: nothing changes
-      g = advanceSeat(g, action==="raise");
-      return g;
-    });
-    setTimeout(() => { processing.current=false; }, 100);
+  // ─── LOGIQUE AVANCEMENT ──────────────────────────────────────────────────────
+  function cp(g){ return JSON.parse(JSON.stringify(g)); }
+
+  function activeSeats(g){
+    const s=[];
+    if(g.pStatus==="active") s.push(0);
+    g.bots.forEach(b=>{ if(b.status==="active") s.push(b.seat); });
+    return s.sort((a,b)=>a-b);
+  }
+  function stillIn(g){
+    const s=[];
+    if(g.pStatus!=="folded") s.push(0);
+    g.bots.forEach(b=>{ if(b.status!=="folded") s.push(b.seat); });
+    return s;
+  }
+  function allEqual(g){
+    const pOk = g.pStatus!=="active" || g.pBet===g.currentBet;
+    const bOk = g.bots.every(b=>b.status!=="active"||b.betThisRound===g.currentBet);
+    return pOk && bOk;
   }
 
-  // Avancer au prochain siège
-  function advanceSeat(g, isRaise=false) {
-    const activeBots = g.bots.filter(b=>b.status==="active"||b.status==="allin");
-    const stillIn = [...(g.playerStatus!=="folded"?[{seat:0}]:[]), ...activeBots];
-
-    if (stillIn.length <= 1) return goShowdown(g);
-
-    // Tous ont égalisé?
-    const allCalled = activeBots.every(b=>b.betThisRound===g.currentBet||b.status==="allin")
-      && (g.playerStatus==="folded" || g.playerBet===g.currentBet || g.playerStatus==="allin");
-
-    if (allCalled && !isRaise) return goNextPhase(g);
-
-    // Prochain siège actif
-    const allSeats = [0,...g.bots.map(b=>b.seat)].sort((a,b)=>a-b);
-    const activeSeats = allSeats.filter(s=>{
-      if(s===0) return g.playerStatus==="active";
-      const b=g.bots.find(x=>x.seat===s);
-      return b&&(b.status==="active");
-    });
-    if (activeSeats.length===0) return goNextPhase(g);
-    const curIdx = activeSeats.indexOf(g.actionSeat);
-    const nextIdx = (curIdx+1)%activeSeats.length;
-    g.actionSeat = activeSeats[nextIdx];
+  function advance(g, raised=false){
+    if(stillIn(g).length<=1) return showdown(g);
+    if(allEqual(g)&&!raised) return nextPhase(g);
+    const seats=activeSeats(g);
+    if(seats.length===0) return nextPhase(g);
+    const ci=seats.indexOf(g.actionSeat);
+    g.actionSeat=seats[(ci+1)%seats.length];
     return g;
   }
 
-  function goNextPhase(g) {
-    // Reset mises du tour
-    g.playerBet = 0;
-    g.bots = g.bots.map(b=>({...b,betThisRound:0}));
-    g.currentBet = 0;
-
-    const activeSeats = [
-      ...(g.playerStatus!=="folded"?[0]:[]),
-      ...g.bots.filter(b=>b.status!=="folded").map(b=>b.seat)
-    ].sort((a,b)=>a-b);
-    g.actionSeat = activeSeats[0]??0;
-
-    if (g.phase==="preflop") {
-      g.community=[g.deck.pop(),g.deck.pop(),g.deck.pop()];
-      g.phase="flop";
-    } else if (g.phase==="flop") {
-      g.community=[...g.community,g.deck.pop()];
-      g.phase="turn";
-    } else if (g.phase==="turn") {
-      g.community=[...g.community,g.deck.pop()];
-      g.phase="river";
-    } else {
-      return goShowdown(g);
-    }
+  function nextPhase(g){
+    g.pBet=0; g.currentBet=0;
+    g.bots.forEach(b=>b.betThisRound=0);
+    const seats=activeSeats(g);
+    g.actionSeat=seats[0]??0;
+    if(g.phase==="preflop"){g.community=[g.dk.pop(),g.dk.pop(),g.dk.pop()];g.phase="flop";}
+    else if(g.phase==="flop"){g.community.push(g.dk.pop());g.phase="turn";}
+    else if(g.phase==="turn"){g.community.push(g.dk.pop());g.phase="river";}
+    else return showdown(g);
     return g;
   }
 
-  function goShowdown(g) {
+  function showdown(g){
     g.phase="showdown";
-    const results=[];
-
-    if (g.playerStatus!=="folded") {
-      const hand=evaluateHand([...g.playerCards,...g.community]);
-      results.push({seat:0,name:"Vous",score:hand.score,handName:hand.name,totalBet:g.playerTotalBet||0});
+    const res=[];
+    if(g.pStatus!=="folded"){
+      const h=evaluateHand([...g.pCards,...g.community]);
+      res.push({seat:0,name:"Vous",score:h.score,hand:h.name,total:g.pTotal});
     }
     g.bots.filter(b=>b.status!=="folded").forEach(b=>{
-      const hand=evaluateHand([...b.holeCards,...g.community]);
-      results.push({seat:b.seat,name:b.name,score:hand.score,handName:hand.name,totalBet:b.totalBet||0});
+      const h=evaluateHand([...b.holeCards,...g.community]);
+      res.push({seat:b.seat,name:b.icon+b.name,score:h.score,hand:h.name,total:b.totalBet});
     });
-
-    if (results.length===0) { g.msg="Tous ont foldé !"; return g; }
-
-    results.sort((a,b)=>b.score-a.score);
-    const topScore=results[0].score;
-    const winners=results.filter(r=>r.score===topScore);
+    if(!res.length){g.msg="Tous ont foldé !";return g;}
+    res.sort((a,b)=>b.score-a.score);
+    const top=res[0].score;
+    const winners=res.filter(r=>r.score===top);
     const share=Math.floor(g.pot/winners.length);
-
     winners.forEach(w=>{
-      if(w.seat===0) g.playerTokens+=share;
-      else { const b=g.bots.find(x=>x.seat===w.seat); if(b) b.tokens+=share; }
+      if(w.seat===0)g.pTokens+=share;
+      else{const b=g.bots.find(x=>x.seat===w.seat);if(b)b.tokens+=share;}
     });
-
     g.winners=winners;
-    const winMsg=winners.map(w=>`${w.name} (${w.handName})`).join(" & ");
-    g.msg=`🏆 ${winMsg} gagne ${share>0?share+"🪙 chacun":""} !`;
-    g.botThinking=false;
+    g.msg=winners.map(w=>`${w.name} (${w.hand})`).join(" & ")+" gagne"+( winners.length>1?"nt":"")+` ${share}🪙 !`;
     return g;
   }
 
-  // ── Tour des bots (useEffect) ──
-  useEffect(() => {
-    if (processing.current) return;
-    if (!["preflop","flop","turn","river"].includes(game.phase)) return;
-    if (game.actionSeat===0) return; // c'est au joueur
-    if (game.botThinking) return;
-
-    const bot = game.bots.find(b=>b.seat===game.actionSeat && b.status==="active");
-    if (!bot) {
-      // Ce siège n'est plus actif, avancer
-      setGame(prev => advanceSeat({...prev, bots:[...prev.bots.map(b=>({...b}))]}, false));
-      return;
-    }
-
-    setGame(prev => ({...prev, botThinking:true}));
-    const delay = 600 + Math.random()*800;
-
-    setTimeout(() => {
-      setGame(prev => {
-        let g = {...prev, bots:[...prev.bots.map(b=>({...b}))], botThinking:false};
-        const b = g.bots.find(x=>x.seat===g.actionSeat);
-        if (!b || b.status!=="active") { return advanceSeat(g,false); }
-
-        const decision = botDecide(b, g);
-        const toCallBot = Math.max(0, g.currentBet-(b.betThisRound||0));
-
-        if (decision==="fold") {
-          b.status="folded";
-          g.msg=`${b.icon} ${b.name} fold`;
-        } else if (decision==="call") {
-          const call=Math.min(toCallBot,b.tokens);
-          b.tokens-=call; b.betThisRound=(b.betThisRound||0)+call;
-          b.totalBet=(b.totalBet||0)+call; g.pot+=call;
-          g.msg=`${b.icon} ${b.name} call ${call}🪙`;
-        } else if (decision==="check") {
-          g.msg=`${b.icon} ${b.name} check`;
-        } else if (decision==="raise") {
-          const raiseExtra=Math.floor((BIG_BLIND + Math.random()*g.pot*0.4));
-          const total=Math.min(toCallBot+raiseExtra,b.tokens);
-          b.tokens-=total; b.betThisRound=(b.betThisRound||0)+total;
-          b.totalBet=(b.totalBet||0)+total; g.pot+=total;
-          g.currentBet=b.betThisRound;
-          g.msg=`${b.icon} ${b.name} raise ${total}🪙`;
+  // ─── BOT TRIGGER ─────────────────────────────────────────────────────────────
+  useEffect(()=>{
+    if(!["preflop","flop","turn","river"].includes(G.phase)) return;
+    if(G.actionSeat===0) return;
+    clearTimeout(timerRef.current);
+    timerRef.current=setTimeout(()=>{
+      setG(prev=>{
+        if(prev.actionSeat===0||!["preflop","flop","turn","river"].includes(prev.phase)) return prev;
+        const g=cp(prev);
+        const bot=g.bots.find(b=>b.seat===g.actionSeat);
+        if(!bot||bot.status!=="active") return advance(g,false);
+        // IA
+        const strength=botHandStrength(bot.holeCards,g.community);
+        const tc=Math.max(0,g.currentBet-(bot.betThisRound||0));
+        const r=Math.random();
+        const agg=0.3+(bot.seat%3)*0.15;
+        let decision="check";
+        if(strength>0.75){ decision=r<agg?"raise":"call"; }
+        else if(strength>0.5){ decision=tc===0?(r<0.25?"raise":"check"):(tc<g.pot*0.35?"call":(r<0.45?"fold":"call")); }
+        else if(strength>0.3){ decision=tc===0?"check":(tc<BB*2?(r<0.5?"call":"fold"):"fold"); }
+        else { decision=tc===0?"check":(r<0.15?"call":"fold"); }
+        const actualTc=Math.min(tc,bot.tokens);
+        if(decision==="fold"){ bot.status="folded"; g.lastAct=`${bot.icon} ${bot.name} fold`; }
+        else if(decision==="call"){ bot.tokens-=actualTc;bot.betThisRound+=actualTc;bot.totalBet+=actualTc;g.pot+=actualTc; g.lastAct=`${bot.icon} ${bot.name} call ${actualTc}🪙`; }
+        else if(decision==="check"){ g.lastAct=`${bot.icon} ${bot.name} check`; }
+        else{
+          const extra=Math.max(BB,Math.floor(g.pot*(0.3+r*0.5)));
+          const tot=Math.min(actualTc+extra,bot.tokens);
+          bot.tokens-=tot;bot.betThisRound+=tot;bot.totalBet+=tot;g.pot+=tot;
+          g.currentBet=bot.betThisRound;
+          g.lastAct=`${bot.icon} ${bot.name} raise ${tot}🪙`;
         }
-        return advanceSeat(g, decision==="raise");
+        return advance(g,decision==="raise");
       });
-    }, delay);
-  }, [game.actionSeat, game.phase, game.botThinking]);
+    }, 500+Math.random()*600);
+    return ()=>clearTimeout(timerRef.current);
+  },[G.actionSeat,G.phase]);
 
-  // ── Nouvelle main ──
-  function newHand() {
-    // Mettre à jour jetons joueur dans DB
-    onUpdateTokens(game.playerTokens - user.tokens, game.winners?.find(w=>w.seat===0) ? "Poker (gagné)" : "Poker (perdu)");
-    // Éliminer les bots à 0 jetons
-    const survivingBots = game.bots.filter(b=>b.tokens>0);
-    if (survivingBots.length===0) {
-      setGame(initGame(game.playerTokens));
-      return;
-    }
-    setGame(initGame(game.playerTokens, survivingBots.map((b,i)=>({...b,seat:i+1}))));
+  // ─── ACTIONS JOUEUR ──────────────────────────────────────────────────────────
+  function act(action,raiseAmt=0){
+    if(!isMyTurn) return;
+    clearTimeout(timerRef.current);
+    setG(prev=>{
+      const g=cp(prev); g.lastAct="";
+      if(action==="fold"){g.pStatus="folded";}
+      else if(action==="call"){const c=Math.min(toCall,g.pTokens);g.pTokens-=c;g.pBet+=c;g.pTotal+=c;g.pot+=c;}
+      else if(action==="check"){/* nothing */}
+      else if(action==="raise"){const c=Math.min(toCall,g.pTokens);const tot=Math.min(c+raiseAmt,g.pTokens);g.pTokens-=tot;g.pBet+=tot;g.pTotal+=tot;g.pot+=tot;g.currentBet=g.pBet;}
+      return advance(g,action==="raise");
+    });
   }
 
-  const PHASE_LABEL={preflop:"Preflop",flop:"Flop",turn:"Turn",river:"River",showdown:"Showdown"};
+  function handleNewHand(){
+    clearTimeout(timerRef.current);
+    onUpdateTokens(G.pTokens-user.tokens,"Poker vs Bots");
+    setG(newHand(G.pTokens, G.bots.filter(b=>b.tokens>0)));
+    setRInput("");
+  }
+
+  // ─── RENDER ──────────────────────────────────────────────────────────────────
+  const PHASE={preflop:"Preflop",flop:"Flop",turn:"Turn",river:"River",showdown:"Showdown"};
+  const myHandStr = G.pCards.length===2&&G.community.length>=3
+    ? evaluateHand([...G.pCards,...G.community]).name : null;
+  const allSeats=[0,...G.bots.map(b=>b.seat)];
 
   return (
-    <div style={{display:"flex",flexDirection:"column",height:"100%",padding:"0 12px 12px"}}>
+    <div style={{display:"flex",flexDirection:"column",height:"100%",background:"#080812",padding:"0 0 10px"}}>
+
       {/* Header */}
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0 6px"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 14px 4px"}}>
         <div>
-          <div style={{color:"#e74c3c",fontSize:10,letterSpacing:2,textTransform:"uppercase"}}>♠ Poker vs Bots — {PHASE_LABEL[game.phase]||""}</div>
-          <div style={{color:"#ffd700",fontSize:18,fontWeight:800}}>🪙 {game.playerTokens.toLocaleString()}</div>
+          <div style={{color:"#e74c3c",fontSize:9,letterSpacing:2,textTransform:"uppercase"}}>♠ Poker vs Bots — {PHASE[G.phase]||""}</div>
+          <div style={{color:"#ffd700",fontSize:17,fontWeight:800}}>🪙 {G.pTokens.toLocaleString()}</div>
         </div>
-        <div style={{display:"flex",gap:6}}>
-          <div style={{color:"#555",fontSize:11,textAlign:"right"}}>
-            <div>Pot</div>
-            <div style={{color:"#ffd700",fontWeight:700}}>{game.pot}🪙</div>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <div style={{textAlign:"right"}}>
+            <div style={{color:"#555",fontSize:9,textTransform:"uppercase"}}>POT</div>
+            <div style={{color:"#ffd700",fontWeight:800,fontSize:16}}>{G.pot}🪙</div>
           </div>
-          <button onClick={onBack} style={{background:"transparent",border:"1px solid #2a2a3e",color:"#555",borderRadius:8,padding:"6px 10px",fontSize:12,cursor:"pointer"}}>✕</button>
+          <button onClick={()=>{clearTimeout(timerRef.current);onUpdateTokens(G.pTokens-user.tokens,"Poker vs Bots");onBack();}}
+            style={{background:"transparent",border:"1px solid #2a2a3e",color:"#555",borderRadius:8,padding:"5px 10px",fontSize:12,cursor:"pointer"}}>✕</button>
         </div>
       </div>
 
-      {/* Table */}
+      {/* TABLE OVALE */}
       <div style={{
-        flex:1,
-        background:"radial-gradient(ellipse at 50% 40%,#1a4a1a 0%,#0d3010 60%,#061808 100%)",
-        borderRadius:16,padding:"10px 10px 8px",
-        border:"2px solid #2a6b2a",
-        boxShadow:"inset 0 0 40px rgba(0,0,0,.6)",
-        display:"flex",flexDirection:"column",justifyContent:"space-between",overflow:"hidden",
+        flex:1,position:"relative",margin:"4px 8px 6px",
+        background:"radial-gradient(ellipse at 50% 50%,#1f6b1f 0%,#0f4010 55%,#072007 100%)",
+        borderRadius:"45%",
+        border:"8px solid #5a3000",
+        boxShadow:"0 0 0 3px #8a5200,inset 0 0 70px rgba(0,0,0,.55),0 10px 40px rgba(0,0,0,.9)",
+        overflow:"visible",minHeight:0,
       }}>
-        {/* Cartes communes */}
-        <div style={{display:"flex",justifyContent:"center",gap:4,marginBottom:6,minHeight:54}}>
-          {[0,1,2,3,4].map(i=>(
-            game.community[i]
-              ? <PokerCard key={i} card={game.community[i]}/>
-              : <div key={i} style={{width:52,height:74,borderRadius:7,border:"1.5px dashed rgba(255,255,255,.08)",background:"rgba(0,0,0,.2)"}}/>
-          ))}
-        </div>
+        {/* Brillance feutre */}
+        <div style={{position:"absolute",inset:0,borderRadius:"45%",background:"radial-gradient(ellipse at 40% 35%,rgba(255,255,255,.06) 0%,transparent 60%)",pointerEvents:"none"}}/>
 
-        {/* Message bot action ou résultat */}
-        <div style={{textAlign:"center",minHeight:22}}>
-          {game.phase==="showdown" && game.msg ? (
-            <div style={{fontSize:13,fontWeight:800,color:"#ffd700",textShadow:"0 0 16px rgba(255,215,0,.6)",animation:"pulse 1s ease-in-out infinite",lineHeight:1.4}}>
-              {game.msg}
-            </div>
-          ) : game.botThinking ? (
-            <div style={{color:"#555",fontSize:11,fontStyle:"italic"}}>
-              {game.bots.find(b=>b.seat===game.actionSeat)?.icon} {game.bots.find(b=>b.seat===game.actionSeat)?.name} réfléchit…
-            </div>
-          ) : game.msg ? (
-            <div style={{color:"#aaa",fontSize:11}}>{game.msg}</div>
-          ) : null}
-        </div>
-
-        {/* Combinaison joueur */}
-        {game.playerCards.length===2 && game.community.length>=3 && game.phase!=="showdown" && (
-          <div style={{textAlign:"center",color:"#ffd700",fontSize:10,fontWeight:700,marginBottom:3}}>
-            {evaluateHand([...game.playerCards,...game.community]).name}
+        {/* Cartes communes CENTRE */}
+        <div style={{
+          position:"absolute",top:"50%",left:"50%",
+          transform:"translate(-50%,-55%)",
+          display:"flex",flexDirection:"column",alignItems:"center",gap:5,zIndex:10,
+        }}>
+          {/* 5 cartes communes */}
+          <div style={{display:"flex",gap:4}}>
+            {[0,1,2,3,4].map(i=>{
+              const c=G.community[i];
+              const red=c&&RED.has(c.suit);
+              return c ? (
+                <div key={i} style={{width:40,height:56,borderRadius:6,background:"#fff",border:"1.5px solid #ddd",
+                  display:"flex",flexDirection:"column",justifyContent:"space-between",padding:"2px 3px",
+                  boxShadow:"0 3px 12px rgba(0,0,0,.7)",flexShrink:0}}>
+                  <div style={{fontSize:11,fontWeight:800,color:red?"#c0392b":"#111",lineHeight:1.1}}>{c.rank}<br/>{c.suit}</div>
+                  <div style={{fontSize:11,fontWeight:800,color:red?"#c0392b":"#111",lineHeight:1.1,alignSelf:"flex-end",transform:"rotate(180deg)"}}>{c.rank}<br/>{c.suit}</div>
+                </div>
+              ) : (
+                <div key={i} style={{width:40,height:56,borderRadius:6,border:"1.5px dashed rgba(255,255,255,.12)",background:"rgba(0,0,0,.18)",flexShrink:0}}/>
+              );
+            })}
           </div>
-        )}
+          {/* Pot + dernière action */}
+          {G.lastAct&&G.phase!=="showdown"&&<div style={{color:"rgba(255,255,255,.55)",fontSize:10,textAlign:"center",maxWidth:160,lineHeight:1.3}}>{G.lastAct}</div>}
+          {G.phase==="showdown"&&G.msg&&<div style={{color:"#ffd700",fontSize:11,fontWeight:800,textAlign:"center",maxWidth:160,lineHeight:1.4,textShadow:"0 0 12px rgba(255,215,0,.6)",animation:"pulse 1s ease-in-out infinite"}}>{G.msg}</div>}
+          {/* Combo joueur */}
+          {myHandStr&&G.phase!=="showdown"&&<div style={{color:"#ffd700",fontSize:10,fontWeight:700,opacity:.9}}>{myHandStr}</div>}
+        </div>
 
-        {/* Joueurs */}
-        <div style={{display:"flex",flexDirection:"column",gap:3}}>
-          {/* Bots */}
-          {game.bots.map(bot=>{
-            const isActing=game.actionSeat===bot.seat&&["preflop","flop","turn","river"].includes(game.phase);
-            const isFolded=bot.status==="folded";
-            const showCards=game.phase==="showdown"&&!isFolded;
-            return (
-              <div key={bot.id} style={{
-                padding:"4px 8px",borderRadius:8,
-                background:"rgba(0,0,0,.25)",
-                border:`1px solid ${isActing?"#ffd700":"#111"}`,
-                opacity:isFolded?.4:1,transition:"opacity .3s",
-                display:"flex",justifyContent:"space-between",alignItems:"center",
+        {/* JOUEURS autour */}
+        {allSeats.map(seat=>{
+          const p=pos(seat);
+          const isMe=seat===0;
+          const bot=isMe?null:G.bots.find(b=>b.seat===seat);
+          const acting=G.actionSeat===seat&&["preflop","flop","turn","river"].includes(G.phase);
+          const st=isMe?G.pStatus:bot?.status;
+          const folded=st==="folded";
+          const tkns=isMe?G.pTokens:bot?.tokens??0;
+          const cards=isMe?G.pCards:bot?.holeCards??[];
+          const bet=isMe?G.pBet:bot?.betThisRound??0;
+          const winner=G.winners?.find(w=>w.seat===seat);
+          const revealBot=G.phase==="showdown"&&!folded&&!isMe;
+          return (
+            <div key={seat} style={{
+              position:"absolute",left:`${p.x}%`,top:`${p.y}%`,
+              transform:"translate(-50%,-50%)",zIndex:acting?20:5,
+              display:"flex",flexDirection:"column",alignItems:"center",gap:2,
+              opacity:folded?.3:1,transition:"opacity .3s",
+            }}>
+              {/* Avatar */}
+              <div style={{
+                width:38,height:38,borderRadius:"50%",
+                background:isMe?"linear-gradient(135deg,#ffd700,#e67e00)":"linear-gradient(135deg,#2a2a3e,#1a1a2e)",
+                border:`2.5px solid ${acting?"#ffd700":winner?"#ffd700":"#2a2a3e"}`,
+                boxShadow:acting?"0 0 14px rgba(255,215,0,.9),0 0 4px rgba(255,215,0,.5)":winner?"0 0 8px rgba(255,215,0,.5)":"none",
+                display:"flex",alignItems:"center",justifyContent:"center",
+                fontSize:isMe?12:17,fontWeight:900,color:isMe?"#111":"#fff",
+                transition:"box-shadow .3s,border-color .3s",
               }}>
-                <div>
-                  <span style={{fontSize:12,marginRight:4}}>{bot.icon}</span>
-                  <span style={{color:isActing?"#ffd700":"#888",fontSize:11,fontWeight:700}}>{bot.name}</span>
-                  {isFolded && <span style={{color:"#e74c3c",fontSize:9,marginLeft:4}}>FOLD</span>}
-                  {bot.status==="allin" && <span style={{color:"#8e44ad",fontSize:9,marginLeft:4}}>ALL-IN</span>}
-                  {game.winners?.find(w=>w.seat===bot.seat) && <span style={{color:"#ffd700",fontSize:9,marginLeft:4}}>🏆</span>}
-                </div>
-                <div style={{display:"flex",gap:4,alignItems:"center"}}>
-                  <span style={{color:"#555",fontSize:10}}>🪙{bot.tokens}</span>
-                  {bot.betThisRound>0&&<span style={{color:"#888",fontSize:10}}>bet:{bot.betThisRound}</span>}
-                  {showCards && bot.holeCards.map((c,i)=><PokerCard key={i} card={c} small/>)}
-                  {!showCards && bot.holeCards.length>0 && !isFolded && (
-                    <>
-                      <div style={{width:28,height:40,borderRadius:4,background:"linear-gradient(135deg,#1a1a2e,#16213e)",border:"1px solid #3a3a5c"}}/>
-                      <div style={{width:28,height:40,borderRadius:4,background:"linear-gradient(135deg,#1a1a2e,#16213e)",border:"1px solid #3a3a5c"}}/>
-                    </>
-                  )}
-                </div>
+                {isMe?"YOU":bot?.icon}
               </div>
-            );
-          })}
-
-          {/* Joueur humain */}
-          <div style={{
-            padding:"5px 8px",borderRadius:8,
-            background:"rgba(255,215,0,.06)",
-            border:`1px solid ${isMyTurn?"#ffd700":game.playerStatus==="folded"?"#333":"#2a2a1e"}`,
-            opacity:game.playerStatus==="folded"?.4:1,
-            display:"flex",justifyContent:"space-between",alignItems:"center",
-          }}>
-            <div>
-              {isMyTurn&&<span style={{fontSize:10,marginRight:4}}>▶</span>}
-              <span style={{color:"#ffd700",fontSize:11,fontWeight:700}}>@{user.username} (moi)</span>
-              {game.playerStatus==="folded"&&<span style={{color:"#e74c3c",fontSize:9,marginLeft:4}}>FOLD</span>}
-              {game.winners?.find(w=>w.seat===0)&&<span style={{color:"#ffd700",fontSize:9,marginLeft:4}}>🏆</span>}
+              {/* Info */}
+              <div style={{
+                background:"rgba(0,0,0,.8)",borderRadius:6,padding:"2px 6px",
+                border:`1px solid ${acting?"rgba(255,215,0,.5)":"rgba(255,255,255,.06)"}`,
+                textAlign:"center",minWidth:52,
+              }}>
+                <div style={{color:isMe?"#ffd700":"#ccc",fontSize:9,fontWeight:700,whiteSpace:"nowrap"}}>
+                  {isMe?"Vous":bot?.name}{winner?" 🏆":""}
+                </div>
+                <div style={{color:"#666",fontSize:8}}>🪙{tkns}</div>
+                {bet>0&&<div style={{color:"rgba(255,215,0,.7)",fontSize:8}}>↑{bet}</div>}
+              </div>
+              {/* Cartes */}
+              <div style={{display:"flex",gap:2}}>
+                {isMe && cards.map((c,i)=>{
+                  const red=RED.has(c.suit);
+                  return(
+                    <div key={i} style={{width:30,height:42,borderRadius:4,background:"#fff",border:"1px solid #ddd",
+                      display:"flex",flexDirection:"column",justifyContent:"space-between",padding:"1px 2px",
+                      boxShadow:"0 2px 8px rgba(0,0,0,.7)",fontSize:9,fontWeight:800,color:red?"#c0392b":"#111",lineHeight:1.1}}>
+                      <div>{c.rank}<br/>{c.suit}</div>
+                      <div style={{alignSelf:"flex-end",transform:"rotate(180deg)"}}>{c.rank}<br/>{c.suit}</div>
+                    </div>
+                  );
+                })}
+                {!isMe&&!folded&&revealBot&&cards.map((c,i)=>{
+                  const red=RED.has(c.suit);
+                  return(
+                    <div key={i} style={{width:26,height:36,borderRadius:4,background:"#fff",border:"1px solid #ddd",
+                      display:"flex",flexDirection:"column",justifyContent:"space-between",padding:"1px 2px",
+                      boxShadow:"0 2px 6px rgba(0,0,0,.7)",fontSize:8,fontWeight:800,color:red?"#c0392b":"#111",lineHeight:1.1}}>
+                      <div>{c.rank}<br/>{c.suit}</div>
+                      <div style={{alignSelf:"flex-end",transform:"rotate(180deg)"}}>{c.rank}<br/>{c.suit}</div>
+                    </div>
+                  );
+                })}
+                {!isMe&&!folded&&!revealBot&&cards.length>0&&(
+                  <>
+                    <div style={{width:22,height:30,borderRadius:3,background:"linear-gradient(135deg,#1a1a2e,#16213e)",border:"1px solid #3a3a5c"}}/>
+                    <div style={{width:22,height:30,borderRadius:3,background:"linear-gradient(135deg,#1a1a2e,#16213e)",border:"1px solid #3a3a5c"}}/>
+                  </>
+                )}
+              </div>
             </div>
-            <div style={{display:"flex",gap:4,alignItems:"center"}}>
-              {game.playerBet>0&&<span style={{color:"#888",fontSize:10}}>bet:{game.playerBet}</span>}
-              {game.playerCards.map((c,i)=><PokerCard key={i} card={c} small/>)}
-            </div>
-          </div>
-        </div>
+          );
+        })}
       </div>
 
       {/* Contrôles */}
-      <div style={{marginTop:10}}>
-        {isMyTurn && (
+      <div style={{padding:"0 12px"}}>
+        {isMyTurn&&(
           <div>
-            <div style={{display:"flex",gap:6,marginBottom:7}}>
-              <button onClick={playerFold} style={{flex:1,padding:11,borderRadius:11,fontSize:13,fontWeight:800,border:"none",background:"#2e1414",color:"#e74c3c",cursor:"pointer"}}>FOLD</button>
+            <div style={{display:"flex",gap:6,marginBottom:6}}>
+              <button onClick={()=>act("fold")} style={{flex:1,padding:11,borderRadius:10,fontSize:13,fontWeight:800,border:"none",background:"#2e1414",color:"#e74c3c",cursor:"pointer"}}>FOLD</button>
               {canCheck
-                ? <button onClick={playerCheck} style={{flex:1,padding:11,borderRadius:11,fontSize:13,fontWeight:800,border:"none",background:"linear-gradient(135deg,#2980b9,#1a6a9a)",color:"#fff",cursor:"pointer"}}>CHECK</button>
-                : <button onClick={playerCall} style={{flex:1,padding:11,borderRadius:11,fontSize:13,fontWeight:800,border:"none",background:"linear-gradient(135deg,#27ae60,#1e8449)",color:"#fff",cursor:"pointer"}}>CALL {toCall}🪙</button>
+                ?<button onClick={()=>act("check")} style={{flex:1,padding:11,borderRadius:10,fontSize:13,fontWeight:800,border:"none",background:"linear-gradient(135deg,#2980b9,#1a6a9a)",color:"#fff",cursor:"pointer"}}>CHECK</button>
+                :<button onClick={()=>act("call")} style={{flex:1,padding:11,borderRadius:10,fontSize:13,fontWeight:800,border:"none",background:"linear-gradient(135deg,#27ae60,#1e8449)",color:"#fff",cursor:"pointer"}}>CALL {toCall}🪙</button>
               }
             </div>
             <div style={{display:"flex",gap:6}}>
-              <input type="number" value={raiseInput} onChange={e=>setRaiseInput(e.target.value)}
-                placeholder={`Raise (min ${BIG_BLIND})`}
-                style={{flex:1,background:"#0e0e1e",border:"1.5px solid #2a2a3e",borderRadius:10,padding:"9px 10px",color:"#ffd700",fontSize:14,fontWeight:700,outline:"none"}}/>
-              <button onClick={playerRaise} style={{padding:"9px 14px",background:"linear-gradient(135deg,#8e44ad,#6c3483)",border:"none",borderRadius:10,fontSize:13,fontWeight:800,color:"#fff",cursor:"pointer"}}>RAISE</button>
+              <input type="number" value={rInput} onChange={e=>setRInput(e.target.value)}
+                placeholder={`Raise min ${BB}…`}
+                style={{flex:1,background:"#0e0e1e",border:"1.5px solid #2a2a3e",borderRadius:9,padding:"8px 10px",color:"#ffd700",fontSize:13,fontWeight:700,outline:"none"}}/>
+              <button onClick={()=>{const a=parseInt(rInput)||0;if(a>=BB){act("raise",a);setRInput("");}}}
+                style={{padding:"8px 14px",background:"linear-gradient(135deg,#8e44ad,#6c3483)",border:"none",borderRadius:9,fontSize:13,fontWeight:800,color:"#fff",cursor:"pointer"}}>RAISE</button>
             </div>
           </div>
         )}
-        {!isMyTurn && game.phase!=="showdown" && (
+        {!isMyTurn&&G.phase!=="showdown"&&(
           <div style={{color:"#555",textAlign:"center",fontSize:12,padding:6}}>
-            {game.playerStatus==="folded"?"Vous avez foldé":"En attente de votre tour…"}
+            {G.pStatus==="folded"?"Vous avez foldé — observez…":"⏳ Les bots jouent…"}
           </div>
         )}
-        {game.phase==="showdown" && (
+        {G.phase==="showdown"&&(
           <div style={{display:"flex",gap:8}}>
-            <button onClick={newHand} style={{flex:1,padding:13,borderRadius:12,fontSize:14,fontWeight:800,border:"none",background:"linear-gradient(135deg,#ffd700,#ffaa00)",color:"#111",cursor:"pointer"}}>↺ Main suivante</button>
-            <button onClick={()=>{
-              onUpdateTokens(game.playerTokens-user.tokens, "Poker vs Bots");
-              onBack();
-            }} style={{flex:1,padding:13,borderRadius:12,fontSize:14,fontWeight:800,border:"1px solid #333",background:"transparent",color:"#888",cursor:"pointer"}}>Quitter</button>
+            <button onClick={handleNewHand} style={{flex:1,padding:12,borderRadius:11,fontSize:14,fontWeight:800,border:"none",background:"linear-gradient(135deg,#ffd700,#ffaa00)",color:"#111",cursor:"pointer"}}>↺ Main suivante</button>
+            <button onClick={()=>{clearTimeout(timerRef.current);onUpdateTokens(G.pTokens-user.tokens,"Poker vs Bots");onBack();}}
+              style={{padding:12,borderRadius:11,fontSize:13,fontWeight:800,border:"1px solid #333",background:"transparent",color:"#888",cursor:"pointer"}}>Quitter</button>
           </div>
         )}
       </div>
     </div>
   );
 }
+
 
 // ── POKER LOBBY ───────────────────────────────────────────────────────────────
 export function PokerLobby({ user, onEnterRoom, onSoloBots, onBack }) {
