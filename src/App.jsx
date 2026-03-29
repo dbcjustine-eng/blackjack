@@ -27,35 +27,21 @@ function freshDeck() {
   return d;
 }
 
-// Pioche truquée : le croupier choisit la carte qui l'avantage le plus
-// parmi N candidats tirés du dessus du deck (invisible pour le joueur).
-// WIN_RATE = probabilité cible que le joueur gagne.
-const WIN_RATE = 0.55; // 55% — compense l'avantage naturel du dealer
-const CHEAT_POOL = 4;  // nb de candidats scannés en secret
+// Pioche légèrement biaisée — 47% de chance de gagner pour le joueur
+const WIN_RATE = 0.47;
+const CHEAT_POOL = 4;
 
-function riggedPop(deck, dealerCurrent, playerScore, winRate = WIN_RATE) {
+function riggedPop(deck, dealerCurrent = [], playerScore = 0) {
   if (deck.length === 0) return null;
-  // On prend un pool de candidats (sans les retirer du deck encore)
   const pool = deck.slice(-CHEAT_POOL);
-  const ds = handScore(dealerCurrent);
-
-  // Si le RNG dit que le croupier doit gagner, on choisit
-  // la carte qui rapproche le croupier de battre le joueur sans buster.
-  const dealerShouldWin = Math.random() > winRate;
-
+  const dealerShouldWin = Math.random() > WIN_RATE;
   let chosen = null;
   if (dealerShouldWin) {
-    // Cherche la carte qui donne au croupier un score ≤21 et > playerScore
-    // Priorité : score le plus proche de 21 sans dépasser
     let bestScore = -1;
     for (const c of pool) {
       const trial = handScore([...dealerCurrent, c]);
-      if (trial <= 21 && trial > playerScore && trial > bestScore) {
-        bestScore = trial;
-        chosen = c;
-      }
+      if (trial <= 21 && trial > playerScore && trial > bestScore) { bestScore = trial; chosen = c; }
     }
-    // Fallback : score le plus élevé ≤21
     if (!chosen) {
       for (const c of pool) {
         const trial = handScore([...dealerCurrent, c]);
@@ -63,9 +49,6 @@ function riggedPop(deck, dealerCurrent, playerScore, winRate = WIN_RATE) {
       }
     }
   }
-
-  // Si le RNG dit que le joueur gagne (35%), on prend la carte la moins bonne
-  // pour le croupier (la plus basse valeur ou celle qui fait buster)
   if (!chosen) {
     let worstScore = 999;
     for (const c of pool) {
@@ -73,8 +56,6 @@ function riggedPop(deck, dealerCurrent, playerScore, winRate = WIN_RATE) {
       if (trial < worstScore) { worstScore = trial; chosen = c; }
     }
   }
-
-  // Retire chosen du deck (on enlève la première occurrence depuis la fin)
   if (!chosen) return deck.pop();
   const idx = deck.lastIndexOf(chosen);
   if (idx !== -1) deck.splice(idx, 1);
@@ -197,12 +178,6 @@ function GameScreen({ user, onUpdateTokens, onLogout }) {
   const [handsPlayed,  setHandsPlayed]  = useState(user.hands_played ?? 0);
   const busy = useRef(false);
 
-  // Les 3 premières mains = 100% de chance de gagner
-  const PROMO_HANDS = 3;
-  function currentWinRate() {
-    return handsPlayed < PROMO_HANDS ? 1.0 : WIN_RATE;
-  }
-
   if (showHistory) return (
     <HistoryScreen
       playerId={user.id}
@@ -298,15 +273,9 @@ function GameScreen({ user, onUpdateTokens, onLogout }) {
     // on le respecte TOUJOURS — même en mode promo 100%
     const dealerHasNaturalBJ = finalDealer.length === 2 && handScore(finalDealer) === 21;
 
-    // Score du joueur le plus fort non-busté (pour guider la triche)
-    const bestPlayerScore = handCards
-      .map(hc => handScore(hc))
-      .filter(s => s <= 21)
-      .reduce((a, b) => Math.max(a, b), 0);
-
     if (!allBust && !dealerHasNaturalBJ) {
       while (handScore(finalDealer) < 17) {
-        const c = riggedPop(tempDeck, finalDealer, bestPlayerScore, currentWinRate());
+        const c = riggedPop(tempDeck, finalDealer, handCards.map(hc=>handScore(hc)).filter(s=>s<=21).reduce((a,b)=>Math.max(a,b),0));
         finalDealer.push(c);
         setDeck([...tempDeck]);
         await animateToDealer(c, true);
@@ -1254,7 +1223,7 @@ function RoomScreen({ user, roomId, isHost: initIsHost, onLeave, onUpdateTokens 
 
     const dealerCards = dealer.map(c=>c.card||c);
     while (handScore(dealerCards)<17) {
-      const c = riggedPop(deck, dealerCards, bestPlayerScore, WIN_RATE);
+      const c = riggedPop(deck, dealerCards, 0);
       dealerCards.push(c);
       dealer.push({card:c,faceUp:true,visible:true});
       await supabase.from("rooms").update({dealer_cards:dealer,deck}).eq("id",roomId);
