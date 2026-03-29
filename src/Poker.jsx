@@ -142,7 +142,7 @@ export function PokerSoloBots({ user, botCount, onBack, onUpdateTokens }) {
     else{const b=newBots.find(x=>x.seat===sbSeat);if(b){b.betThisRound=SMALL_BLIND;b.totalBet=SMALL_BLIND;b.tokens-=SMALL_BLIND;}}
     if(bbSeat===0){playerTokens-=BIG_BLIND;pBet=BIG_BLIND;}
     else{const b=newBots.find(x=>x.seat===bbSeat);if(b){b.betThisRound=BIG_BLIND;b.totalBet=BIG_BLIND;b.tokens-=BIG_BLIND;}}
-    return {deck,community:[],pot,currentBet:BIG_BLIND,phase:"preflop",actionSeat,dealerSeat:0,sbSeat,bbSeat,playerCards,playerBet:pBet,playerTotalBet:pBet,playerStatus:"active",bots:newBots,playerTokens,msg:"",winners:[],lastRaiseSeat:null};
+    return {deck,community:[],pot,currentBet:BIG_BLIND,phase:"preflop",actionSeat,dealerSeat:0,sbSeat,bbSeat,playerCards,playerBet:pBet,playerTotalBet:pBet,playerStatus:"active",bots:newBots,playerTokens,msg:"",winners:[],lastRaiseSeat:null,actedSinceRaise:new Set()};
   }
 
   const [game,setGame]=useState(()=>buildGame(user.tokens));
@@ -151,42 +151,61 @@ export function PokerSoloBots({ user, botCount, onBack, onUpdateTokens }) {
   const advance=useCallback((g,isRaise=false)=>{
     // Joueurs encore en jeu (pas foldés)
     const stillIn=[
-      ...(g.playerStatus!=="folded"?[{seat:0,bet:g.playerBet,status:g.playerStatus}]:[]),
-      ...g.bots.filter(b=>b.status!=="folded").map(b=>({seat:b.seat,bet:b.betThisRound,status:b.status}))
+      ...(g.playerStatus!=="folded"?[0]:[]),
+      ...g.bots.filter(b=>b.status!=="folded").map(b=>b.seat)
     ];
     if(stillIn.length<=1) return doShowdown(g);
 
-    // Si raise : mémoriser qui vient de raiser → la prochaine fois qu'on revient à lui, le tour s'arrête
-    if(isRaise) g.lastRaiseSeat=g.actionSeat;
+    // Tous les sièges dans l'ordre (incluant les foldés pour garder l'ordre de rotation)
+    const allSeatsOrdered=[0,...g.bots.map(b=>b.seat)].sort((a,b)=>a-b);
 
-    // Joueurs actifs (peuvent encore agir)
+    // Si raise : mémoriser qui a raisé + réinitialiser les "ont agi depuis raise"
+    if(isRaise){
+      g.lastRaiseSeat=g.actionSeat;
+      g.actedSinceRaise=new Set([g.actionSeat]);
+    } else {
+      // Marquer que ce siège a agi
+      if(!g.actedSinceRaise) g.actedSinceRaise=new Set();
+      g.actedSinceRaise.add(g.actionSeat);
+    }
+
+    // Trouver le prochain siège DANS L'ORDRE (en incluant foldés pour rotation)
+    // mais on skip les foldés pour l'action
+    const ci=allSeatsOrdered.indexOf(g.actionSeat);
+    let nextSeat=null;
+    for(let i=1;i<=allSeatsOrdered.length;i++){
+      const candidate=allSeatsOrdered[(ci+i)%allSeatsOrdered.length];
+      // Skip si foldé
+      if(candidate===0 && g.playerStatus==="folded") continue;
+      const bot=g.bots.find(b=>b.seat===candidate);
+      if(bot && bot.status==="folded") continue;
+      nextSeat=candidate;
+      break;
+    }
+    if(nextSeat===null) return doNextPhase(g);
+
+    // Joueurs actifs (pas foldés, pas all-in)
     const activeSeats=[
       ...(g.playerStatus==="active"?[0]:[]),
       ...g.bots.filter(b=>b.status==="active").map(b=>b.seat)
-    ].sort((a,b)=>a-b);
+    ];
 
-    if(activeSeats.length===0) return doNextPhase(g);
-
-    // Passer au siège suivant
-    const ci=activeSeats.indexOf(g.actionSeat);
-    const nextSeat=activeSeats[(ci+1)%activeSeats.length];
-
-    // Vérifier si le tour est complet :
-    // Le tour est complet si le prochain siège à jouer est celui qui a raisé en dernier
-    // ET tous les actifs ont mis la même chose
+    // Le tour est terminé si :
+    // 1. Le prochain joueur est le raiser ET tous ceux qui pouvaient agir l'ont fait
+    // 2. Pas de raise en cours et tout le monde a égalisé
     const allEq=activeSeats.every(s=>{
       if(s===0) return g.playerBet===g.currentBet||g.playerStatus==="allin";
       const b=g.bots.find(x=>x.seat===s);
       return b&&(b.betThisRound===g.currentBet||b.status==="allin");
     });
 
-    // Si tout le monde a égalisé et que le prochain c'est le raiser → phase suivante
-    if(allEq && g.lastRaiseSeat!=null && nextSeat===g.lastRaiseSeat) {
-      return doNextPhase(g);
-    }
-    // Si tout le monde a égalisé et pas de raise → phase suivante
-    if(allEq && g.lastRaiseSeat==null) {
-      return doNextPhase(g);
+    if(allEq){
+      // Si raise en cours : finir seulement si le prochain est le raiser (il a déjà agi)
+      if(g.lastRaiseSeat!=null){
+        if(nextSeat===g.lastRaiseSeat) return doNextPhase(g);
+      } else {
+        return doNextPhase(g);
+      }
     }
 
     g.actionSeat=nextSeat;
@@ -195,7 +214,7 @@ export function PokerSoloBots({ user, botCount, onBack, onUpdateTokens }) {
 
   function doNextPhase(g) {
     g.playerBet=0; g.bots=g.bots.map(b=>({...b,betThisRound:0})); g.currentBet=0;
-    g.lastRaiseSeat=null; // réinitialiser pour la nouvelle phase
+    g.lastRaiseSeat=null; g.actedSinceRaise=new Set(); // réinitialiser pour la nouvelle phase
     const as=[...(g.playerStatus!=="folded"?[0]:[]),...g.bots.filter(b=>b.status!=="folded").map(b=>b.seat)].sort((a,b)=>a-b);
     g.actionSeat=as[0]??0;
     if(g.phase==="preflop"){g.community=[g.deck.pop(),g.deck.pop(),g.deck.pop()];g.phase="flop";}
@@ -311,13 +330,27 @@ export function PokerSoloBots({ user, botCount, onBack, onUpdateTokens }) {
         <div style={{position:"absolute",left:"7%",right:"7%",top:"4%",bottom:"4%",background:"radial-gradient(ellipse at 50% 50%,#1d7a30 0%,#0d4a1a 55%,#071808 100%)",borderRadius:"50%",border:"5px solid #0a3010",boxShadow:"inset 0 0 70px rgba(0,0,0,.65),0 0 20px rgba(0,0,0,.4)"}}/>
         <div style={{position:"absolute",left:"4%",right:"4%",top:"1%",bottom:"1%",borderRadius:"50%",border:"9px solid #6b3810",boxShadow:"inset 0 0 0 2px #3a1e08,0 0 0 2px #8a5520",pointerEvents:"none"}}/>
 
-        {/* Cartes communes */}
-        <div style={{position:"absolute",left:"50%",top:"40%",transform:"translate(-50%,-50%)",display:"flex",gap:5,alignItems:"center"}}>
-          {[0,1,2,3,4].map(i=>(
-            g.community[i]
-              ? <PCard key={i} card={g.community[i]} hidden={false} size="xl"/>
-              : <div key={i} style={{width:58,height:82,borderRadius:7,border:"1.5px dashed rgba(255,255,255,.1)",background:"rgba(0,0,0,.12)"}}/>
-          ))}
+        {/* Cartes communes + POT */}
+        <div style={{position:"absolute",left:"50%",top:"40%",transform:"translate(-50%,-50%)",display:"flex",flexDirection:"column",alignItems:"center",gap:8}}>
+          <div style={{display:"flex",gap:5,alignItems:"center"}}>
+            {[0,1,2,3,4].map(i=>(
+              g.community[i]
+                ? <PCard key={i} card={g.community[i]} hidden={false} size="xl"/>
+                : <div key={i} style={{width:58,height:82,borderRadius:7,border:"1.5px dashed rgba(255,255,255,.1)",background:"rgba(0,0,0,.12)"}}/>
+            ))}
+          </div>
+          {g.pot>0&&(
+            <div style={{
+              background:"rgba(0,0,0,.75)",borderRadius:20,
+              padding:"5px 18px",
+              border:"1.5px solid rgba(255,215,0,.35)",
+              display:"flex",alignItems:"center",gap:6,
+            }}>
+              <span style={{color:"#aaa",fontSize:11,textTransform:"uppercase",letterSpacing:1}}>Pot</span>
+              <span style={{color:"#ffd700",fontSize:22,fontWeight:900,lineHeight:1}}>{g.pot.toLocaleString()}</span>
+              <span style={{color:"#ffd700",fontSize:14}}>🪙</span>
+            </div>
+          )}
         </div>
 
         {myHandName&&g.phase!=="showdown"&&(
@@ -584,8 +617,22 @@ export function PokerRoom({ user, roomId, onLeave, onUpdateTokens }) {
         <div style={{position:"absolute",left:"7%",right:"7%",top:"4%",bottom:"4%",background:"radial-gradient(ellipse at 50% 50%,#1d7a30 0%,#0d4a1a 55%,#071808 100%)",borderRadius:"50%",border:"5px solid #0a3010",boxShadow:"inset 0 0 70px rgba(0,0,0,.65)"}}/>
         <div style={{position:"absolute",left:"4%",right:"4%",top:"1%",bottom:"1%",borderRadius:"50%",border:"9px solid #6b3810",pointerEvents:"none"}}/>
 
-        <div style={{position:"absolute",left:"50%",top:"40%",transform:"translate(-50%,-50%)",display:"flex",gap:4}}>
-          {[0,1,2,3,4].map(i=>(comm[i]?<PCard key={i} card={comm[i]} hidden={false} size="lg"/>:<div key={i} style={{width:58,height:82,borderRadius:7,border:"1.5px dashed rgba(255,255,255,.1)",background:"rgba(0,0,0,.12)"}}/>))}
+        <div style={{position:"absolute",left:"50%",top:"40%",transform:"translate(-50%,-50%)",display:"flex",flexDirection:"column",alignItems:"center",gap:8}}>
+          <div style={{display:"flex",gap:4}}>
+            {[0,1,2,3,4].map(i=>(comm[i]?<PCard key={i} card={comm[i]} hidden={false} size="lg"/>:<div key={i} style={{width:58,height:82,borderRadius:7,border:"1.5px dashed rgba(255,255,255,.1)",background:"rgba(0,0,0,.12)"}}/>))}
+          </div>
+          {(room.pot||0)>0&&(
+            <div style={{
+              background:"rgba(0,0,0,.75)",borderRadius:20,
+              padding:"5px 18px",
+              border:"1.5px solid rgba(255,215,0,.35)",
+              display:"flex",alignItems:"center",gap:6,
+            }}>
+              <span style={{color:"#aaa",fontSize:11,textTransform:"uppercase",letterSpacing:1}}>Pot</span>
+              <span style={{color:"#ffd700",fontSize:22,fontWeight:900,lineHeight:1}}>{(room.pot||0).toLocaleString()}</span>
+              <span style={{color:"#ffd700",fontSize:14}}>🪙</span>
+            </div>
+          )}
         </div>
         {myHandName&&rs!=="showdown"&&<div style={{position:"absolute",left:"50%",top:"56%",transform:"translateX(-50%)",background:"rgba(0,0,0,.7)",borderRadius:6,padding:"2px 12px",color:"#ffd700",fontSize:10,fontWeight:700,whiteSpace:"nowrap"}}>{myHandName}</div>}
         {rs==="showdown"&&winners.length>0&&<div style={{position:"absolute",left:"50%",top:"26%",transform:"translateX(-50%)",background:"rgba(0,0,0,.88)",borderRadius:10,padding:"5px 14px",color:"#ffd700",fontSize:12,fontWeight:800,whiteSpace:"nowrap",textAlign:"center",animation:"tableGlow 1s ease-in-out infinite"}}>🏆 {winners.map(w=>"@"+w.username).join(" & ")} — {winners[0]?.hand}</div>}
