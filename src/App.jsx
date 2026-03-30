@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { supabase } from "./supabase.js";
 import { PokerLobby, PokerRoom, PokerSoloBots } from "./Poker.jsx";
+import { RamiLobby, RamiRoom } from "./Rami.jsx";
 
 // ── TRANSACTION LOGGER ────────────────────────────────────────────────────────
 export async function logTransaction(playerId, type, amount, description, balanceAfter) {
@@ -928,7 +929,7 @@ function HistoryScreen({ playerId, playerName, onBack, isAdmin }) {
 
 
 // ── LOBBY SCREEN ─────────────────────────────────────────────────────────────
-function LobbyScreen({ user, onEnterRoom, onSolo, onPoker, onLogout }) {
+function LobbyScreen({ user, onEnterRoom, onSolo, onPoker, onRami, onLogout }) {
   const [roomCode,  setRoomCode]  = useState("");
   const [creating,  setCreating]  = useState(false);
   const [joining,   setJoining]   = useState(false);
@@ -1002,12 +1003,20 @@ function LobbyScreen({ user, onEnterRoom, onSolo, onPoker, onLogout }) {
       }}>🃏 Blackjack solo</button>
 
       <button onClick={onPoker} style={{
-        width:"100%", padding:16, marginBottom:12,
+        width:"100%", padding:16, marginBottom:10,
         background:"linear-gradient(135deg,#e74c3c,#c0392b)",
         border:"none", borderRadius:14, fontSize:16, fontWeight:900,
         color:"#fff", cursor:"pointer", letterSpacing:1,
         boxShadow:"0 5px 24px rgba(231,76,60,.35)",
       }}>♠ Poker Texas Hold'em</button>
+
+      <button onClick={onRami} style={{
+        width:"100%", padding:16, marginBottom:12,
+        background:"linear-gradient(135deg,#8e44ad,#6c3483)",
+        border:"none", borderRadius:14, fontSize:16, fontWeight:900,
+        color:"#fff", cursor:"pointer", letterSpacing:1,
+        boxShadow:"0 5px 24px rgba(142,68,173,.35)",
+      }}>🎴 Rami 101</button>
 
       <div style={{display:"flex",alignItems:"center",gap:10,margin:"4px 0 14px"}}>
         <div style={{flex:1,height:1,background:"#1a1a2e"}}/>
@@ -1674,6 +1683,7 @@ export default function App() {
   const [roomId,      setRoomId]      = useState(null);
   const [pokerRoomId, setPokerRoomId] = useState(null);
   const [pokerBotCount,setPokerBotCount]= useState(3);
+  const [ramiRoomId,   setRamiRoomId]   = useState(null);
   const [isHost,      setIsHost]      = useState(false);
 
   async function updateTokens(delta, description = "") {
@@ -1701,7 +1711,7 @@ export default function App() {
         {!currentUser && <LoginScreen onLogin={setCurrentUser}/>}
         {currentUser && currentUser.is_admin && <AdminPanel currentUser={currentUser} onLogout={handleLogout}/>}
         {currentUser && !currentUser.is_admin && screen==="lobby" && (
-          <LobbyScreen user={currentUser} onSolo={()=>setScreen("solo")} onPoker={()=>setScreen("poker-lobby")} onEnterRoom={handleEnterRoom} onLogout={handleLogout}/>
+          <LobbyScreen user={currentUser} onSolo={()=>setScreen("solo")} onPoker={()=>setScreen("poker-lobby")} onRami={()=>setScreen("rami-lobby")} onEnterRoom={handleEnterRoom} onLogout={handleLogout}/>
         )}
         {currentUser && !currentUser.is_admin && screen==="solo" && (
           <GameScreen user={currentUser} onUpdateTokens={updateTokens} onLogout={()=>setScreen("lobby")}/>
@@ -1717,6 +1727,12 @@ export default function App() {
         )}
         {currentUser && !currentUser.is_admin && screen==="poker-solo-bots" && (
           <PokerSoloBots user={currentUser} botCount={pokerBotCount} onBack={()=>setScreen("poker-lobby")} onUpdateTokens={updateTokens}/>
+        )}
+        {currentUser && !currentUser.is_admin && screen==="rami-lobby" && (
+          <RamiLobby user={currentUser} onEnterRoom={id=>{setRamiRoomId(id);setScreen("rami-room");}} onBack={()=>setScreen("lobby")}/>
+        )}
+        {currentUser && !currentUser.is_admin && screen==="rami-room" && ramiRoomId && (
+          <RamiRoom user={currentUser} roomId={ramiRoomId} onLeave={()=>setScreen("rami-lobby")}/>
         )}
       </div>
 
